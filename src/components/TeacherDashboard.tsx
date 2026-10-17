@@ -42,6 +42,7 @@ import { TeacherProfile } from '../utils/api';
 import { copyTextToClipboard, formatTime, getExamShareUrl, getConfiguredCloudUrl, setConfiguredCloudUrl } from '../utils/helpers';
 import { GeminiQuizGenerator } from './GeminiQuizGenerator';
 import { ShareExamModal } from './ShareExamModal';
+import { MathText, MathEquationToolbar } from './MathText';
 
 interface TeacherDashboardProps {
   teacher: TeacherProfile;
@@ -638,8 +639,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                             <Clock className="w-3.5 h-3.5 text-amber-400" />
                             <span>Examiner Time Limit (Fixed for Students):</span>
                           </span>
-                          <div className="flex items-center gap-1.5">
-                            {[5, 10, 15, 20, 30, 45, 60].map((mins) => (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {[5, 10, 15, 20, 30, 45, 60, 90, 120, 180].map((mins) => (
                               <button
                                 key={mins}
                                 type="button"
@@ -656,7 +657,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                           </div>
                         </div>
 
-                        <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                        <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
                           {ex.questions.map((qItem, qIdx) => (
                             <div
                               key={qItem.id}
@@ -664,10 +665,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                             >
                               <div className="space-y-1 min-w-0">
                                 <p className="font-semibold text-slate-200">
-                                  Q{qIdx + 1}. {qItem.q}
+                                  Q{qIdx + 1}. <MathText text={qItem.q} />
                                 </p>
                                 <p className="text-[11px] text-emerald-400">
-                                  Correct Answer: {qItem.options[qItem.correctIndex]}
+                                  Correct Answer: <MathText text={qItem.options[qItem.correctIndex]} />
                                 </p>
                               </div>
                               <button
@@ -687,7 +688,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                           className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-3"
                         >
                           <span className="text-xs font-bold text-indigo-300 block">
-                            + Add Custom Question to {ex.code}
+                            + Add Custom Question to {ex.code} (Supports English, മലയാളം, हिन्दी &amp; $...$ Math Equations)
                           </span>
                           <input
                             type="text"
@@ -696,8 +697,14 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                               setNewQuestionText(e.target.value);
                               if (questionFormError) setQuestionFormError('');
                             }}
-                            placeholder="Enter question text"
+                            placeholder="Enter question text (e.g., Solve $x^2 - 5x + 6 = 0$)"
                             className="w-full rounded-lg bg-slate-900 border border-slate-800 focus:border-indigo-500 px-3 py-2 text-xs text-white placeholder-slate-500 outline-none"
+                          />
+                          <MathEquationToolbar
+                            compact
+                            onInsert={(latex) =>
+                              setNewQuestionText((prev) => (prev ? `${prev} ${latex}` : latex))
+                            }
                           />
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                             {newOptions.map((optVal, optIdx) => (
@@ -997,7 +1004,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                                           <XCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
                                         )}
                                         <span className="font-semibold text-white leading-snug">
-                                          Q{qIdx + 1}. {ans.questionText}
+                                          Q{qIdx + 1}. <MathText text={ans.questionText} />
                                         </span>
                                       </div>
 
@@ -1038,7 +1045,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                                               <strong className="font-mono mr-1.5">
                                                 {['A', 'B', 'C', 'D'][optIdx] || optIdx + 1}.
                                               </strong>
-                                              {optText}
+                                              <MathText text={optText} />
                                             </span>
                                             <div className="flex items-center gap-1 shrink-0">
                                               {isStudentPick && (
@@ -1095,10 +1102,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   >
                     <div className="space-y-1 min-w-0">
                       <p className="font-semibold text-white">
-                        Q{qStat.index}. {qStat.questionText}
+                        Q{qStat.index}. <MathText text={qStat.questionText} />
                       </p>
                       <p className="text-emerald-400">
-                        Correct Answer: <strong>{qStat.correctAnswer}</strong>
+                        Correct Answer: <strong><MathText text={qStat.correctAnswer} /></strong>
                       </p>
                     </div>
                     <div className="flex items-center gap-2 shrink-0 font-mono">

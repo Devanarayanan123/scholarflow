@@ -21,6 +21,7 @@ import { Exam, Question, Submission, ViolationLog } from '../types';
 import { formatTime, getExamShareUrl, shuffleArray } from '../utils/helpers';
 import { api } from '../utils/api';
 import { AntiCheatViolationModal } from './AntiCheatViolationModal';
+import { MathText } from './MathText';
 
 interface StudentPortalProps {
   examCode: string;
@@ -495,7 +496,9 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ examCode }) => {
                   </div>
                 </div>
 
-                <h4 className="text-base sm:text-lg font-display font-semibold text-white leading-relaxed">{currentQ.q}</h4>
+                <h4 className="text-base sm:text-lg font-display font-semibold text-white leading-relaxed">
+                  <MathText text={currentQ.q} />
+                </h4>
 
                 <div className="space-y-3 pt-1">
                   {currentQ.options.map((optText, optIdx) => {
@@ -522,7 +525,9 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ examCode }) => {
                         >
                           {String.fromCharCode(65 + optIdx)}
                         </span>
-                        <span className="text-sm sm:text-base leading-snug">{optText}</span>
+                        <span className="text-sm sm:text-base leading-snug">
+                          <MathText text={optText} />
+                        </span>
                       </button>
                     );
                   })}
@@ -670,7 +675,7 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ examCode }) => {
                           <XCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
                         )}
                         <span className="font-semibold text-white leading-snug">
-                          Q{i + 1}. {ans.questionText}
+                          Q{i + 1}. <MathText text={ans.questionText} />
                         </span>
                       </div>
                       <span
@@ -685,17 +690,21 @@ export const StudentPortal: React.FC<StudentPortalProps> = ({ examCode }) => {
                       <div className="text-slate-400">
                         Your answer:{' '}
                         <strong className={ans.isCorrect ? 'text-emerald-300' : 'text-rose-300'}>
-                          {skipped ? 'Not answered' : ans.options[ans.chosenIndex]}
+                          {skipped ? 'Not answered' : <MathText text={ans.options[ans.chosenIndex]} />}
                         </strong>
                       </div>
                       {!ans.isCorrect && (
                         <div className="text-slate-400">
-                          Correct answer: <strong className="text-emerald-300">{ans.options[ans.correctIndex]}</strong>
+                          Correct answer:{' '}
+                          <strong className="text-emerald-300">
+                            <MathText text={ans.options[ans.correctIndex]} />
+                          </strong>
                         </div>
                       )}
                       {ans.explanation && (
                         <p className="text-slate-400 border-t border-slate-800/80 pt-2 mt-2 leading-relaxed">
-                          <span className="text-slate-300 font-semibold">Explanation:</span> {ans.explanation}
+                          <span className="text-slate-300 font-semibold">Explanation:</span>{' '}
+                          <MathText text={ans.explanation} />
                         </p>
                       )}
                     </div>

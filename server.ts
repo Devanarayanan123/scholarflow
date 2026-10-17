@@ -299,12 +299,12 @@ function sanitizeQuestion(raw: any, idx: number): Question | null {
   };
 }
 
-function generateUniqueCode(prefixSource: string): string {
+function generateUniqueCode(prefixSource: string, fallback = 'QUIZ'): string {
   const prefix =
-    String(prefixSource || 'QUIZ')
+    String(prefixSource || '')
       .replace(/[^a-zA-Z]/g, '')
       .toUpperCase()
-      .slice(0, 4) || 'QUIZ';
+      .slice(0, 4) || fallback;
   for (let attempt = 0; attempt < 50; attempt++) {
     const code = `${prefix}-${crypto.randomInt(1000, 10000)}`;
     if (!db.exams.some((e) => e.code === code)) return code;
@@ -1198,31 +1198,45 @@ async function fetchYouTubeVideoContext(rawUrl: string): Promise<{
   return { videoTitle, authorName, description, keywords, transcript };
 }
 
-async function fetchWikipediaContext(topic: string): Promise<string> {
+async function fetchWikipediaContext(topic: string, language = 'Indian English'): Promise<string> {
   const clean = topic.trim().slice(0, 120);
   if (!clean || clean.length < 2) return '';
-  try {
-    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
-      clean
-    )}&utf8=&format=json&srlimit=2`;
-    const res = await fetch(searchUrl, {
-      headers: { 'User-Agent': 'ScholarFlowQuizPlatform/1.0' }
-    });
-    if (!res.ok) return '';
-    const data: any = await res.json();
-    const firstTitle = data?.query?.search?.[0]?.title;
-    if (!firstTitle) return '';
 
-    const summaryRes = await fetch(
-      `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(firstTitle)}`,
-      { headers: { 'User-Agent': 'ScholarFlowQuizPlatform/1.0' } }
-    );
-    if (!summaryRes.ok) return '';
-    const summaryData: any = await summaryRes.json();
-    return String(summaryData?.extract || '').slice(0, 2500);
-  } catch {
-    return '';
+  const hasMalayalamChars = /[\u0D00-\u0D7F]/.test(clean);
+  const hasHindiChars = /[\u0900-\u097F]/.test(clean);
+  const langDomains: string[] = [];
+  if (language.includes('Malayalam') || hasMalayalamChars) langDomains.push('ml');
+  if (language.includes('Hindi') || hasHindiChars) langDomains.push('hi');
+  langDomains.push('en');
+
+  const extracts: string[] = [];
+  for (const wikiLang of langDomains) {
+    try {
+      const searchUrl = `https://${wikiLang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
+        clean
+      )}&utf8=&format=json&srlimit=2`;
+      const res = await fetch(searchUrl, {
+        headers: { 'User-Agent': 'ScholarFlowQuizPlatform/1.0' }
+      });
+      if (!res.ok) continue;
+      const data: any = await res.json();
+      const firstTitle = data?.query?.search?.[0]?.title;
+      if (!firstTitle) continue;
+
+      const summaryRes = await fetch(
+        `https://${wikiLang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(firstTitle)}`,
+        { headers: { 'User-Agent': 'ScholarFlowQuizPlatform/1.0' } }
+      );
+      if (!summaryRes.ok) continue;
+      const summaryData: any = await summaryRes.json();
+      const text = String(summaryData?.extract || '').trim();
+      if (text) {
+        extracts.push(text.slice(0, 2000));
+      }
+    } catch {}
   }
+
+  return extracts.join('\n\n').slice(0, 3200);
 }
 
 function extractUploadedFileText(fileName: string, fileMimeType: string, fileData: string): string {
@@ -1240,9 +1254,9 @@ function extractUploadedFileText(fileName: string, fileMimeType: string, fileDat
     ) {
       return buf.toString('utf8').slice(0, 8000);
     }
-    // Extract readable ASCII text runs from PDF/DOCX buffers
-    const rawStr = buf.toString('latin1');
-    const matches = rawStr.match(/[A-Za-z0-9 ,.;:'"?!()-]{15,}/g);
+    // Extract readable text runs from PDF/DOCX buffers
+    const rawStr = buf.toString('utf8');
+    const matches = rawStr.match(/[A-Za-z0-9\u0900-\u097F\u0D00-\u0D7F ,.;:'"?!()+\-*/=^]{12,}/g);
     if (matches && matches.length > 0) {
       return matches.join(' ').slice(0, 6000);
     }
@@ -1274,121 +1288,56 @@ function parseJsonFromAiResponse(rawText: string): any {
   }
 }
 
-async function generateQuizWithRealAi(params: {
-  sourceType: string;
-  topic: string;
-  content: string;
-  url: string;
-  fileName: string;
-  fileMimeType: string;
-  fileData: string;
-  difficulty: string;
-  count: number;
-  points: number;
-}): Promise<{
-  title: string;
-  subject: string;
-  description: string;
-  questions: Question[];
-}> {
-  const { sourceType, topic, content, url, fileName, fileMimeType, fileData, difficulty, count, points } = params;
+function getLanguageInstruction(language: string): string {
+  switch (language) {
+    case 'Malayalam':
+      return `LANGUAGE REQUIREMENT — MALAYALAM (മലയാളം):
+- Write the quiz "title", "description", every question ("q"), all 4 answer choices ("options"), and every "explanation" strictly in authentic, natural, grammatically accurate MALAYALAM script (മലയാളം).
+- Keep mathematical equations, numbers, chemical symbols, or LaTeX formulas wrapped in $...$ inside the Malayalam sentences (e.g., "സമവാക്യത്തിന്റെ മൂല്യം കണ്ടെത്തുക: $x^2 - 5x + 6 = 0$").`;
+    case 'Hindi':
+      return `LANGUAGE REQUIREMENT — HINDI (हिन्दी):
+- Write the quiz "title", "description", every question ("q"), all 4 answer choices ("options"), and every "explanation" strictly in authentic, natural, grammatically accurate HINDI Devanagari script (हिन्दी).
+- Keep mathematical equations, numbers, chemical symbols, or LaTeX formulas wrapped in $...$ inside the Hindi sentences (e.g., "समीकरण $x^2 - 5x + 6 = 0$ के मूल ज्ञात कीजिए:").`;
+    case 'English + Malayalam':
+      return `LANGUAGE REQUIREMENT — BILINGUAL (INDIAN ENGLISH + മലയാളം):
+- Write every question ("q") and all 4 answer choices ("options") bilingually in BOTH Indian English and Malayalam script (മലയാളം), separated by " / " (for example: "What is the derivative of $\\sin(x)$? / $\\sin(x)$-ന്റെ അവകലജം (Derivative) എന്താണ്?").
+- Provide clear explanations in Indian English and Malayalam.`;
+    case 'English + Hindi':
+      return `LANGUAGE REQUIREMENT — BILINGUAL (INDIAN ENGLISH + हिन्दी):
+- Write every question ("q") and all 4 answer choices ("options") bilingually in BOTH Indian English and Hindi Devanagari script (हिन्दी), separated by " / " (for example: "What is the derivative of $\\sin(x)$? / $\\sin(x)$ का अवकलज (Derivative) क्या है?").
+- Provide clear explanations in Indian English and Hindi.`;
+    case 'Indian English':
+    default:
+      return `LANGUAGE REQUIREMENT — INDIAN ENGLISH:
+- Use clear, standard Indian academic English aligned with NCERT / CBSE / ICSE / State Board and Indian University curricula.
+- If the topic itself is about Malayalam or Hindi literature/grammar, include the appropriate Malayalam (മലയാളം) or Hindi (हिन्दी) script terms and sentences directly in the questions and options.`;
+  }
+}
 
-  let subjectTitle = topic.trim();
-  let contextBlocks: string[] = [];
+function getMathInstruction(mathMode: boolean, topicText: string): string {
+  const looksLikeMathOrStem =
+    mathMode ||
+    /\b(math|maths|mathematics|algebra|calculus|trigonometry|geometry|equation|equations|derivative|integral|matrix|matrices|quadratic|polynomial|probability|statistics|vector|physics|thermodynamics|kinematics|electrostatics|mechanics)\b/i.test(
+      topicText
+    ) ||
+    /ഗണിതം|സമവാക്യം|गणित|समीकरण/.test(topicText);
 
-  // 1. If source is YouTube, fetch the REAL video title, channel, description, keywords, and transcript
-  if (sourceType === 'youtube' && url) {
-    const yt = await fetchYouTubeVideoContext(url);
-    const effectiveVideoTopic = yt.videoTitle || topic.trim() || 'Educational Video Topic';
-    subjectTitle = topic.trim() ? `${topic.trim()} (${yt.videoTitle || 'Video'})` : effectiveVideoTopic;
-
-    if (yt.videoTitle) {
-      contextBlocks.push(`YouTube Video Title: ${yt.videoTitle}`);
-    }
-    if (yt.authorName) {
-      contextBlocks.push(`Channel / Instructor: ${yt.authorName}`);
-    }
-    if (yt.keywords.length > 0) {
-      contextBlocks.push(`Video Topic Keywords: ${yt.keywords.slice(0, 25).join(', ')}`);
-    }
-    if (yt.description) {
-      contextBlocks.push(`Video Description & Lecture Notes:\n${yt.description}`);
-    }
-    if (yt.transcript) {
-      contextBlocks.push(`Video Spoken Transcript Excerpt:\n${yt.transcript}`);
-    }
-    if (content.trim()) {
-      contextBlocks.push(`Teacher's Specific Focus Instructions: ${content.trim()}`);
-    }
-    // Also fetch Wikipedia reference for the video's subject if transcript wasn't available
-    if (!yt.transcript && yt.videoTitle) {
-      const cleanedTitle = yt.videoTitle
-        .replace(/\(.*?\)|\[.*?\]/g, '')
-        .replace(/full course|tutorial|lecture|explained|crash course|in \d+ minutes/gi, '')
-        .trim();
-      const wiki = await fetchWikipediaContext(cleanedTitle);
-      if (wiki) contextBlocks.push(`Factual Reference Summary on "${cleanedTitle}":\n${wiki}`);
-    }
-  } else if (sourceType === 'document' || sourceType === 'file') {
-    const cleanFileTitle = (fileName || '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
-    subjectTitle = topic.trim() || cleanFileTitle || 'Document Assessment';
-    const extractedText = extractUploadedFileText(fileName, fileMimeType, fileData);
-    if (extractedText) {
-      contextBlocks.push(`Uploaded Document ("${fileName}") Content:\n${extractedText}`);
-    }
-    if (content.trim()) {
-      contextBlocks.push(`Teacher Instructions / Focus Area:\n${content.trim()}`);
-    }
-    const wiki = await fetchWikipediaContext(subjectTitle);
-    if (wiki) contextBlocks.push(`Reference Context:\n${wiki}`);
-  } else {
-    // Topic or Syllabus mode
-    subjectTitle = topic.trim().split('\n')[0].slice(0, 100) || 'Academic Assessment';
-    if (content.trim()) {
-      contextBlocks.push(`Provided Topic / Syllabus Material:\n${content.trim().slice(0, 8000)}`);
-    }
-    const wiki = await fetchWikipediaContext(subjectTitle);
-    if (wiki) {
-      contextBlocks.push(`Factual Reference Context on "${subjectTitle}":\n${wiki}`);
-    }
+  if (!looksLikeMathOrStem) {
+    return `If any question involves a mathematical or scientific formula, wrap the formula in inline LaTeX delimiters $...$ (for example, $E = mc^2$ or $\\frac{a}{b}$).`;
   }
 
-  const systemPrompt = `You are an expert academic professor and exam designer.
-Your task is to generate a genuine, fact-checked, curriculum-accurate multiple-choice quiz strictly about the specific subject/topic provided.
+  return `MATHEMATICS & EQUATIONS REQUIREMENT (LATEX FORMULAS ENABLED):
+- Include genuine mathematical equations, algebraic expressions, formulas, and numerical problem-solving in the questions, answer options, and explanations.
+- Format ALL mathematical equations, fractions, exponents, roots, integrals, derivatives, Greek letters, and trigonometric expressions using standard inline LaTeX wrapped in single dollar signs: $...$
+  Examples of proper formatting in JSON strings (remember to double-escape backslashes in JSON as \\\\):
+  - Quadratic equation: "$x = \\\\frac{-b \\\\pm \\\\sqrt{b^2 - 4ac}}{2a}$"
+  - Calculus: "$\\\\int_{0}^{\\\\pi} \\\\sin(x)\\\\,dx = 2$" or "$\\\\frac{d}{dx}(x^3 - 4x^2 + 7) = 3x^2 - 8x$"
+  - Trigonometry: "$\\\\sin^2\\\\theta + \\\\cos^2\\\\theta = 1$"
+  - Algebra / Systems: "$2x + 3y = 12$" and "$x^2 - 9x + 20 = 0$"
+- Make sure the 4 options also use clean LaTeX "$...$" where expressions/values are shown, and the "explanation" shows the step-by-step equation solution.`;
+}
 
-CRITICAL RULES:
-1. Every single question MUST test real, specific facts, concepts, formulas, history, definitions, or problem-solving directly about the requested topic.
-2. NEVER generate generic meta-questions like "What is the foundational analytical principle governing X?" or "Why is predictive modeling important in X?".
-3. If a YouTube video is provided, NEVER ask questions about YouTube as a website/platform—ask questions strictly about the EDUCATIONAL SUBJECT MATTER taught in that video (e.g., its science, math, coding, history, or literature concepts).
-4. Vary which option index (0, 1, 2, or 3) is the correct answer across questions.
-5. Output ONLY valid JSON matching the exact schema below—no extra commentary.`;
-
-  const userPrompt = `Generate ${count} multiple-choice questions at the "${difficulty}" difficulty level.
-
-Target Subject / Topic: "${subjectTitle}"
-Source Mode: ${sourceType}
-
-${contextBlocks.length > 0 ? `Reference Material & Context:\n${contextBlocks.join('\n\n')}\n` : ''}
-Return ONLY a valid JSON object with this exact structure:
-{
-  "title": "Concise, specific academic quiz title for ${subjectTitle}",
-  "subject": "Specific subject name",
-  "description": "1-sentence summary of the specific concepts tested in this quiz",
-  "questions": [
-    {
-      "q": "Specific, factual multiple-choice question?",
-      "options": [
-        "Option A",
-        "Option B",
-        "Option C",
-        "Option D"
-      ],
-      "correctIndex": 0,
-      "explanation": "Clear, factual explanation of why the correct option is right and others are wrong."
-    }
-  ]
-}`;
-
+async function callAiJsonBatch(systemPrompt: string, userPrompt: string): Promise<any> {
   let parsed: any = null;
 
   // Attempt 1: If a standard Google Gemini API key (AIza...) is configured in .env, try @google/genai
@@ -1410,8 +1359,8 @@ Return ONLY a valid JSON object with this exact structure:
     }
   }
 
-  // Attempt 2: Live OpenAI-compatible LLM inference via Pollinations AI (zero key required, real LLM)
-  if (!parsed || !Array.isArray(parsed?.questions) || parsed.questions.length === 0) {
+  // Attempt 2: Live OpenAI-compatible LLM inference via Pollinations AI
+  if (!parsed || (!Array.isArray(parsed) && !Array.isArray(parsed?.questions))) {
     const aiRes = await fetch('https://text.pollinations.ai/openai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1437,44 +1386,224 @@ Return ONLY a valid JSON object with this exact structure:
     parsed = parseJsonFromAiResponse(rawContent);
   }
 
-  const rawQuestions: any[] = Array.isArray(parsed)
-    ? parsed
-    : Array.isArray(parsed?.questions)
-    ? parsed.questions
-    : [];
+  return parsed;
+}
 
-  const questions: Question[] = rawQuestions
-    .map((item, idx) => {
-      if (!item || typeof item.q !== 'string' || !Array.isArray(item.options) || item.options.length < 2) {
-        return null;
-      }
-      const cleanOptions = item.options.slice(0, 4).map((o: unknown) => String(o ?? '').trim());
-      while (cleanOptions.length < 4) {
-        cleanOptions.push(`Option ${cleanOptions.length + 1}`);
-      }
-      const validCorrect = clampInt(item.correctIndex, 0, cleanOptions.length - 1, 0);
-      return {
-        id: `q_${Date.now()}_${idx}`,
-        q: item.q.trim(),
-        options: cleanOptions,
-        correctIndex: validCorrect,
-        points,
-        explanation: String(item.explanation || 'Verified correct answer based on the topic material.').trim()
-      };
-    })
-    .filter(Boolean) as Question[];
+async function generateQuizWithRealAi(params: {
+  sourceType: string;
+  topic: string;
+  content: string;
+  url: string;
+  fileName: string;
+  fileMimeType: string;
+  fileData: string;
+  difficulty: string;
+  count: number;
+  points: number;
+  language: string;
+  mathMode: boolean;
+}): Promise<{
+  title: string;
+  subject: string;
+  description: string;
+  questions: Question[];
+}> {
+  const {
+    sourceType,
+    topic,
+    content,
+    url,
+    fileName,
+    fileMimeType,
+    fileData,
+    difficulty,
+    count,
+    points,
+    language,
+    mathMode
+  } = params;
 
-  if (questions.length === 0) {
+  let subjectTitle = topic.trim();
+  const contextBlocks: string[] = [];
+
+  // 1. If source is YouTube, fetch the REAL video title, channel, description, keywords, and transcript
+  if (sourceType === 'youtube' && url) {
+    const yt = await fetchYouTubeVideoContext(url);
+    const effectiveVideoTopic = yt.videoTitle || topic.trim() || 'Educational Video Topic';
+    subjectTitle = topic.trim() ? `${topic.trim()} (${yt.videoTitle || 'Video'})` : effectiveVideoTopic;
+
+    if (yt.videoTitle) {
+      contextBlocks.push(`YouTube Video Title: ${yt.videoTitle}`);
+    }
+    if (yt.authorName) {
+      contextBlocks.push(`Channel / Instructor: ${yt.authorName}`);
+    }
+    if (yt.keywords.length > 0) {
+      contextBlocks.push(`Video Topic Keywords: ${yt.keywords.slice(0, 25).join(', ')}`);
+    }
+    if (yt.description) {
+      contextBlocks.push(`Video Description & Lecture Notes:\n${yt.description}`);
+    }
+    if (yt.transcript) {
+      contextBlocks.push(`Video Spoken Transcript Excerpt:\n${yt.transcript}`);
+    }
+    if (content.trim()) {
+      contextBlocks.push(`Teacher's Specific Focus Instructions: ${content.trim()}`);
+    }
+    if (!yt.transcript && yt.videoTitle) {
+      const cleanedTitle = yt.videoTitle
+        .replace(/\(.*?\)|\[.*?\]/g, '')
+        .replace(/full course|tutorial|lecture|explained|crash course|in \d+ minutes/gi, '')
+        .trim();
+      const wiki = await fetchWikipediaContext(cleanedTitle, language);
+      if (wiki) contextBlocks.push(`Factual Reference Summary on "${cleanedTitle}":\n${wiki}`);
+    }
+  } else if (sourceType === 'document' || sourceType === 'file') {
+    const cleanFileTitle = (fileName || '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+    subjectTitle = topic.trim() || cleanFileTitle || 'Document Assessment';
+    const extractedText = extractUploadedFileText(fileName, fileMimeType, fileData);
+    if (extractedText) {
+      contextBlocks.push(`Uploaded Document ("${fileName}") Content:\n${extractedText}`);
+    }
+    if (content.trim()) {
+      contextBlocks.push(`Teacher Instructions / Focus Area:\n${content.trim()}`);
+    }
+    const wiki = await fetchWikipediaContext(subjectTitle, language);
+    if (wiki) contextBlocks.push(`Reference Context:\n${wiki}`);
+  } else {
+    // Topic or Syllabus mode
+    subjectTitle = topic.trim().split('\n')[0].slice(0, 100) || (mathMode ? 'Mathematics & Equations' : 'Academic Assessment');
+    if (content.trim()) {
+      contextBlocks.push(`Provided Topic / Syllabus Material:\n${content.trim().slice(0, 8000)}`);
+    }
+    const wiki = await fetchWikipediaContext(subjectTitle, language);
+    if (wiki) {
+      contextBlocks.push(`Factual Reference Context on "${subjectTitle}":\n${wiki}`);
+    }
+  }
+
+  const langRules = getLanguageInstruction(language);
+  const mathRules = getMathInstruction(mathMode, `${subjectTitle} ${content}`);
+
+  const systemPrompt = `You are an expert academic professor, multilingual educator (fluent in Malayalam മലയാളം, Hindi हिन्दी, and Indian English), and mathematics/science exam designer.
+Your task is to generate a genuine, fact-checked, curriculum-accurate multiple-choice quiz strictly about the specific subject/topic provided.
+
+CRITICAL RULES:
+1. Every single question MUST test real, specific facts, concepts, formulas, equations, grammar/literature, history, definitions, or problem-solving directly about the requested topic.
+2. NEVER generate generic meta-questions like "What is the foundational analytical principle governing X?" or "Why is predictive modeling important in X?".
+3. If a YouTube video is provided, NEVER ask questions about YouTube as a website/platform—ask questions strictly about the EDUCATIONAL SUBJECT MATTER taught in that video.
+4. Vary which option index (0, 1, 2, or 3) is the correct answer across questions.
+5. ${langRules}
+6. ${mathRules}
+7. Output ONLY valid JSON matching the exact schema requested—no extra commentary.`;
+
+  // Generate in batches of up to 12 questions per LLM call so requests up to 50 questions never get truncated
+  const BATCH_SIZE = 12;
+  const collectedQuestions: Question[] = [];
+  const seenQuestionStems = new Set<string>();
+  let quizTitle = '';
+  let quizSubject = '';
+  let quizDescription = '';
+
+  const maxBatches = Math.ceil(count / BATCH_SIZE) + 2;
+  let batchAttempt = 0;
+
+  while (collectedQuestions.length < count && batchAttempt < maxBatches) {
+    batchAttempt++;
+    const remaining = count - collectedQuestions.length;
+    const currentBatchCount = Math.min(BATCH_SIZE, remaining);
+
+    const avoidList =
+      collectedQuestions.length > 0
+        ? `\nALREADY GENERATED QUESTIONS (DO NOT REPEAT THESE — CREATE NEW, DISTINCT QUESTIONS COVERING OTHER SUBTOPICS/PROBLEMS):\n${collectedQuestions
+            .slice(-25)
+            .map((q, i) => `${i + 1}. ${q.q}`)
+            .join('\n')}\n`
+        : '';
+
+    const userPrompt = `Generate ${currentBatchCount} distinct multiple-choice questions at the "${difficulty}" difficulty level (Batch ${batchAttempt}).
+
+Target Subject / Topic: "${subjectTitle}"
+Selected Language / Medium: ${language}
+Mathematics & Equations Mode: ${mathMode ? 'ENABLED (Use LaTeX $...$ equations & numerical problems)' : 'Standard'}
+Source Mode: ${sourceType}
+
+${contextBlocks.length > 0 ? `Reference Material & Context:\n${contextBlocks.join('\n\n')}\n` : ''}${avoidList}
+Return ONLY a valid JSON object with this exact structure:
+{
+  "title": "Concise, specific academic quiz title for ${subjectTitle} (in ${language})",
+  "subject": "Specific subject name",
+  "description": "1-sentence summary of the specific concepts tested in this quiz (in ${language})",
+  "questions": [
+    {
+      "q": "Specific, factual multiple-choice question (with $...$ LaTeX equations if math/science)?",
+      "options": [
+        "Option A",
+        "Option B",
+        "Option C",
+        "Option D"
+      ],
+      "correctIndex": 0,
+      "explanation": "Clear step-by-step explanation of why the correct option is right."
+    }
+  ]
+}`;
+
+    try {
+      const parsed = await callAiJsonBatch(systemPrompt, userPrompt);
+      if (!quizTitle && parsed?.title) quizTitle = String(parsed.title).trim();
+      if (!quizSubject && parsed?.subject) quizSubject = String(parsed.subject).trim();
+      if (!quizDescription && parsed?.description) quizDescription = String(parsed.description).trim();
+
+      const rawQuestions: any[] = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.questions)
+        ? parsed.questions
+        : [];
+
+      for (const item of rawQuestions) {
+        if (collectedQuestions.length >= count) break;
+        if (!item || typeof item.q !== 'string' || !Array.isArray(item.options) || item.options.length < 2) {
+          continue;
+        }
+        const qText = item.q.trim();
+        const normalizedStem = qText.toLowerCase().replace(/\s+/g, ' ');
+        if (!qText || seenQuestionStems.has(normalizedStem)) continue;
+        seenQuestionStems.add(normalizedStem);
+
+        const cleanOptions = item.options.slice(0, 4).map((o: unknown) => String(o ?? '').trim());
+        while (cleanOptions.length < 4) {
+          cleanOptions.push(`Option ${cleanOptions.length + 1}`);
+        }
+        const validCorrect = clampInt(item.correctIndex, 0, cleanOptions.length - 1, 0);
+        collectedQuestions.push({
+          id: `q_${Date.now()}_${collectedQuestions.length}`,
+          q: qText,
+          options: cleanOptions,
+          correctIndex: validCorrect,
+          points,
+          explanation: String(item.explanation || 'Verified correct answer based on the topic material.').trim()
+        });
+      }
+    } catch (batchErr) {
+      console.warn(`Batch ${batchAttempt} warning:`, batchErr);
+      if (collectedQuestions.length === 0 && batchAttempt >= 2) {
+        throw batchErr;
+      }
+    }
+  }
+
+  if (collectedQuestions.length === 0) {
     throw new Error('Could not generate valid questions for this topic. Please try again with more detail.');
   }
 
   return {
-    title: String(parsed?.title || subjectTitle).slice(0, 200),
-    subject: String(parsed?.subject || subjectTitle).slice(0, 200),
-    description: String(
-      parsed?.description || `AI-generated ${difficulty} assessment on ${subjectTitle}.`
+    title: (quizTitle || subjectTitle).slice(0, 200),
+    subject: (quizSubject || subjectTitle).slice(0, 200),
+    description: (
+      quizDescription || `AI-generated ${difficulty} assessment on ${subjectTitle} (${language}).`
     ).slice(0, 1000),
-    questions
+    questions: collectedQuestions.slice(0, count)
   };
 }
 
@@ -1493,12 +1622,16 @@ app.post('/api/generate-quiz', requireTeacher, async (req: AuthedRequest, res: R
       difficulty = 'Intermediate',
       questionCount = 5,
       pointsPerQuestion = 2,
-      timeLimitMinutes = 15
+      timeLimitMinutes = 15,
+      language = 'Indian English',
+      mathMode = false
     } = req.body || {};
 
-    const parsedCount = clampInt(questionCount, 2, 20, 5);
+    const parsedCount = clampInt(questionCount, 1, 50, 5);
     const parsedPoints = clampInt(pointsPerQuestion, 1, 20, 2);
     const parsedDifficulty = DIFFICULTIES.includes(difficulty) ? difficulty : 'Intermediate';
+    const parsedLanguage = String(language || 'Indian English').trim();
+    const parsedMathMode = Boolean(mathMode);
 
     const generated = await generateQuizWithRealAi({
       sourceType: String(sourceType),
@@ -1510,10 +1643,20 @@ app.post('/api/generate-quiz', requireTeacher, async (req: AuthedRequest, res: R
       fileData: String(fileData || ''),
       difficulty: parsedDifficulty,
       count: parsedCount,
-      points: parsedPoints
+      points: parsedPoints,
+      language: parsedLanguage,
+      mathMode: parsedMathMode
     });
 
-    const code = generateUniqueCode(generated.subject || generated.title || 'QUIZ');
+    const fallbackPrefix =
+      parsedMathMode
+        ? 'MATH'
+        : parsedLanguage.includes('Malayalam')
+        ? 'MALM'
+        : parsedLanguage.includes('Hindi')
+        ? 'HIND'
+        : 'QUIZ';
+    const code = generateUniqueCode(generated.subject || generated.title, fallbackPrefix);
     const exam: StoredExam = {
       id: code,
       code,

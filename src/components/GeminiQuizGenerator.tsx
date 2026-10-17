@@ -9,9 +9,12 @@ import {
   Clock,
   Layers,
   Gauge,
-  CheckCircle2
+  CheckCircle2,
+  Languages,
+  Calculator
 } from 'lucide-react';
 import { Exam } from '../types';
+import { MathEquationToolbar } from './MathText';
 
 interface GeminiQuizGeneratorProps {
   teacherEmail: string;
@@ -19,6 +22,23 @@ interface GeminiQuizGeneratorProps {
   onExamGenerated: (exam: Exam) => void;
   onShowToast: (message: string, type?: 'success' | 'error') => void;
 }
+
+export type QuizLanguage =
+  | 'Indian English'
+  | 'Malayalam'
+  | 'Hindi'
+  | 'English + Malayalam'
+  | 'English + Hindi';
+
+const LANGUAGE_OPTIONS: Array<{ value: QuizLanguage; label: string; badge: string }> = [
+  { value: 'Indian English', label: 'Indian English', badge: 'EN-IN' },
+  { value: 'Malayalam', label: 'Malayalam (മലയാളം)', badge: 'മലയാളം' },
+  { value: 'Hindi', label: 'Hindi (हिन्दी)', badge: 'हिन्दी' },
+  { value: 'English + Malayalam', label: 'Bilingual (English + മലയാളം)', badge: 'EN + മ' },
+  { value: 'English + Hindi', label: 'Bilingual (English + हिन्दी)', badge: 'EN + हि' }
+];
+
+const QUESTION_COUNT_PRESETS = [5, 10, 15, 20, 25, 30, 40, 50];
 
 export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
   teacherEmail,
@@ -35,12 +55,23 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
     base64: string;
   } | null>(null);
 
+  const [language, setLanguage] = useState<QuizLanguage>('Indian English');
+  const [mathMode, setMathMode] = useState<boolean>(false);
   const [difficulty, setDifficulty] = useState<'Foundational' | 'Intermediate' | 'Advanced'>('Intermediate');
-  const [questionCount, setQuestionCount] = useState<number>(5);
+  const [questionCount, setQuestionCount] = useState<number>(10);
   const [timeLimitMinutes, setTimeLimitMinutes] = useState<number>(15);
   const [isGenerating, setIsGenerating] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleQuestionCountChange = (newCount: number) => {
+    const clamped = Math.max(1, Math.min(50, Math.round(Number(newCount) || 5)));
+    setQuestionCount(clamped);
+    // Automatically scale suggested timer if the teacher picks a larger exam
+    if (clamped >= 40 && timeLimitMinutes < 45) setTimeLimitMinutes(60);
+    else if (clamped >= 25 && timeLimitMinutes < 30) setTimeLimitMinutes(30);
+    else if (clamped >= 15 && timeLimitMinutes < 20) setTimeLimitMinutes(20);
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -63,6 +94,11 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
     reader.readAsDataURL(file);
   };
 
+  const handleInsertLatex = (snippet: string) => {
+    setMathMode(true);
+    setTextInput((prev) => (prev ? `${prev} ${snippet}` : snippet));
+  };
+
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -72,7 +108,7 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
     }
 
     if (sourceType === 'topic' && !textInput.trim()) {
-      onShowToast('Please enter a topic or chapter name.', 'error');
+      onShowToast('Please enter a topic, subject, or math concept.', 'error');
       return;
     }
     if (sourceType === 'syllabus' && !textInput.trim()) {
@@ -88,6 +124,7 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
       return;
     }
 
+    const validCount = Math.max(1, Math.min(50, Math.round(Number(questionCount) || 5)));
     setIsGenerating(true);
 
     try {
@@ -96,9 +133,11 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
         teacherName,
         sourceType: sourceType === 'file' ? 'document' : sourceType,
         difficulty,
-        questionCount,
+        questionCount: validCount,
         pointsPerQuestion: 2,
-        timeLimitMinutes: Number(timeLimitMinutes) || 15
+        timeLimitMinutes: Number(timeLimitMinutes) || 15,
+        language,
+        mathMode
       };
 
       if (sourceType === 'topic' || sourceType === 'syllabus') {
@@ -133,7 +172,9 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
         throw new Error('Could not parse generated quiz.');
       }
 
-      onShowToast(`Generated quiz ${data.exam.code} via Gemini (${teacherEmail})`);
+      onShowToast(
+        `Generated ${data.exam.questions.length}-question quiz (${data.exam.code}) in ${language}`
+      );
       onExamGenerated(data.exam);
       setTextInput('');
       setYoutubeUrl('');
@@ -159,7 +200,7 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
               Gemini AI Quiz Generator
             </h2>
             <p className="text-xs text-slate-400">
-              Provide a topic, syllabus, YouTube link, or textbook file to create a quiz
+              Generate up to 50 questions in Malayalam (മലയാളം), Hindi (हिन्दी), Indian English, or Maths with LaTeX Equations
             </p>
           </div>
         </div>
@@ -176,7 +217,7 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
         </div>
       </div>
 
-      {/* Source Type Selector Pills */}
+      {/* Step 1: Material Source */}
       <div className="space-y-2">
         <label className="block text-xs font-semibold text-slate-300">
           1. Select Material Source
@@ -239,6 +280,72 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
         </div>
       </div>
 
+      {/* Step 2: Language & Maths Equation Mode */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 p-4 rounded-2xl bg-slate-950/70 border border-slate-800/90">
+        <div className="lg:col-span-8 space-y-2">
+          <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-300">
+            <Languages className="w-3.5 h-3.5 text-indigo-400" />
+            <span>Question Language &amp; Medium</span>
+          </label>
+          <div className="flex flex-wrap gap-2">
+            {LANGUAGE_OPTIONS.map((opt) => {
+              const active = language === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  type="button"
+                  onClick={() => setLanguage(opt.value)}
+                  className={`px-3 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 border transition-all ${
+                    active
+                      ? 'bg-indigo-600/25 border-indigo-500 text-white shadow-sm'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                  }`}
+                >
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                      active ? 'bg-indigo-500 text-white' : 'bg-slate-800 text-slate-300'
+                    }`}
+                  >
+                    {opt.badge}
+                  </span>
+                  <span>{opt.label}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="lg:col-span-4 space-y-2 flex flex-col justify-between">
+          <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-300">
+            <Calculator className="w-3.5 h-3.5 text-emerald-400" />
+            <span>Mathematics &amp; Equations</span>
+          </label>
+          <button
+            type="button"
+            onClick={() => setMathMode((prev) => !prev)}
+            className={`w-full px-3.5 py-2.5 rounded-xl text-xs font-bold flex items-center justify-between gap-2 border transition-all ${
+              mathMode
+                ? 'bg-emerald-500/20 border-emerald-500 text-emerald-200 shadow-sm'
+                : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+            }`}
+          >
+            <span className="flex items-center gap-2">
+              <span className="font-mono text-xs px-1.5 py-0.5 rounded bg-slate-950 text-emerald-400 border border-emerald-500/30">
+                ∑ x²
+              </span>
+              <span>Maths with Equations</span>
+            </span>
+            <span
+              className={`px-2 py-0.5 rounded-full text-[10px] uppercase tracking-wider font-extrabold ${
+                mathMode ? 'bg-emerald-500 text-slate-950' : 'bg-slate-800 text-slate-400'
+              }`}
+            >
+              {mathMode ? 'ON' : 'OFF'}
+            </span>
+          </button>
+        </div>
+      </div>
+
       <input
         type="file"
         ref={fileInputRef}
@@ -251,23 +358,36 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
         {/* Topic or Syllabus Input */}
         {(sourceType === 'topic' || sourceType === 'syllabus') && (
           <div className="space-y-2.5">
-            <label className="block text-xs font-semibold text-slate-300">
-              {sourceType === 'topic'
-                ? '2. Enter Subject, Chapter, or Concept'
-                : '2. Paste Course Syllabus or Textbook Text'}
-            </label>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="block text-xs font-semibold text-slate-300">
+                {sourceType === 'topic'
+                  ? '2. Enter Subject, Chapter, Language Topic, or Math Concept'
+                  : '2. Paste Course Syllabus or Textbook Text'}
+              </label>
+              <span className="text-[11px] text-slate-400">
+                Supports English, മലയാളം, हिन्दी &amp; LaTeX equations ($...$)
+              </span>
+            </div>
             <textarea
               rows={4}
               required
               value={textInput}
               onChange={(e) => setTextInput(e.target.value)}
               placeholder={
-                sourceType === 'topic'
-                  ? 'Enter your subject, topic, or chapter details...'
+                mathMode
+                  ? 'e.g., Quadratic Equations, Calculus Derivatives & Integrals, Trigonometry ($\\sin^2\\theta + \\cos^2\\theta = 1$), Matrices, or Linear Equations...'
+                  : language === 'Malayalam'
+                  ? 'ഉദാഹരണം: കേരള ചരിത്രം, മലയാള വ്യാകരണം, പ്രകാശസംശ്ലേഷണം, അല്ലെങ്കിൽ ഗണിത സമവാക്യങ്ങൾ...'
+                  : language === 'Hindi'
+                  ? 'उदाहरण: हिंदी व्याकरण, भारतीय इतिहास, प्रकाश संश्लेषण, या द्विघात समीकरण (Quadratic Equations)...'
+                  : sourceType === 'topic'
+                  ? 'Enter your subject, topic, chapter, or math concept (in English, മലയാളം, or हिन्दी)...'
                   : 'Paste your syllabus units, textbook content, or lecture notes...'
               }
               className="w-full rounded-xl bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 px-4 py-3 text-sm text-slate-100 placeholder-slate-500 outline-none leading-relaxed"
             />
+
+            {mathMode && <MathEquationToolbar onInsert={handleInsertLatex} />}
           </div>
         )}
 
@@ -283,19 +403,19 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
                 required
                 value={youtubeUrl}
                 onChange={(e) => setYoutubeUrl(e.target.value)}
-                placeholder="Paste YouTube video link"
+                placeholder="Paste YouTube lecture or lesson link"
                 className="w-full rounded-xl bg-slate-950 border border-slate-800 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 px-4 py-2.5 text-sm text-slate-100 placeholder-slate-500 outline-none"
               />
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-400 mb-1.5">
-                Video Topic or Focus Notes (Optional)
+                Video Topic or Focus Notes (Optional — English, മലയാളം, or हिन्दी)
               </label>
               <input
                 type="text"
                 value={textInput}
                 onChange={(e) => setTextInput(e.target.value)}
-                placeholder="Enter video topic or focus area"
+                placeholder="Optional: Specify focus area or equations to emphasize"
                 className="w-full rounded-xl bg-slate-950 border border-slate-800 focus:border-indigo-500 px-4 py-2.5 text-xs text-slate-100 placeholder-slate-500 outline-none"
               />
             </div>
@@ -339,30 +459,63 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
           </div>
         )}
 
-        {/* Examiner Configuration Controls */}
-        <div className="pt-2 border-t border-slate-800/80">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
-            <div>
-              <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-300 mb-1.5">
-                <Layers className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Number of Questions</span>
+        {/* Examiner Configuration Controls: Question Count up to 50, Difficulty, Timer */}
+        <div className="pt-3 border-t border-slate-800/80 space-y-4">
+          {/* Number of Questions Range (1 to 50) + Quick Presets */}
+          <div className="p-4 rounded-2xl bg-slate-950/80 border border-slate-800/90 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                <Layers className="w-4 h-4 text-indigo-400" />
+                <span>Number of Questions (Range: 1 to 50)</span>
               </label>
-              <select
-                value={questionCount}
-                onChange={(e) => setQuestionCount(Number(e.target.value))}
-                className="w-full rounded-xl bg-slate-950 border border-slate-800 focus:border-indigo-500 px-3.5 py-2.5 text-xs sm:text-sm text-slate-200 outline-none"
-              >
-                <option value={3}>3 Questions</option>
-                <option value={5}>5 Questions</option>
-                <option value={8}>8 Questions</option>
-                <option value={10}>10 Questions</option>
-              </select>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={questionCount}
+                  onChange={(e) => handleQuestionCountChange(Number(e.target.value))}
+                  className="w-20 rounded-xl bg-slate-900 border border-indigo-500/40 focus:border-indigo-500 px-3 py-1.5 text-center font-mono text-sm font-bold text-indigo-300 outline-none"
+                />
+                <span className="text-xs text-slate-400 font-semibold">/ 50 Max</span>
+              </div>
             </div>
 
+            <input
+              type="range"
+              min={1}
+              max={50}
+              step={1}
+              value={questionCount}
+              onChange={(e) => handleQuestionCountChange(Number(e.target.value))}
+              className="w-full accent-indigo-500 cursor-pointer h-2 bg-slate-800 rounded-lg"
+            />
+
+            <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+              <span className="text-[11px] text-slate-500 mr-1">Quick select:</span>
+              {QUESTION_COUNT_PRESETS.map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => handleQuestionCountChange(preset)}
+                  className={`px-2.5 py-1 rounded-lg font-mono text-xs font-bold border transition ${
+                    questionCount === preset
+                      ? 'bg-indigo-600 border-indigo-400 text-white shadow-sm'
+                      : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white hover:border-slate-700'
+                  }`}
+                >
+                  {preset} Qs
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
             <div>
               <label className="flex items-center gap-1.5 text-xs font-semibold text-slate-300 mb-1.5">
                 <Gauge className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Difficulty</span>
+                <span>Difficulty Level</span>
               </label>
               <select
                 value={difficulty}
@@ -391,7 +544,10 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
                 <option value={20}>20 Minutes (Fixed)</option>
                 <option value={30}>30 Minutes (Fixed)</option>
                 <option value={45}>45 Minutes (Fixed)</option>
-                <option value={60}>60 Minutes (Fixed)</option>
+                <option value={60}>60 Minutes (1 Hour)</option>
+                <option value={90}>90 Minutes (1.5 Hours)</option>
+                <option value={120}>120 Minutes (2 Hours)</option>
+                <option value={180}>180 Minutes (3 Hours)</option>
               </select>
             </div>
 
@@ -404,12 +560,12 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
                 {isGenerating ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Generating...</span>
+                    <span>Generating {questionCount} Qs...</span>
                   </>
                 ) : (
                   <>
                     <Sparkles className="w-4 h-4" />
-                    <span>Generate Quiz</span>
+                    <span>Generate {questionCount} Questions</span>
                   </>
                 )}
               </button>
