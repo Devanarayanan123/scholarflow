@@ -13,6 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+app.set('trust proxy', 1);
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
@@ -310,13 +311,44 @@ function toStudentExam(exam: StoredExam): Exam {
 }
 
 // ---------------------------------------------------------------------------
-// Auth routes
+// Auth & Cloud routes
 // ---------------------------------------------------------------------------
-app.get('/api/config', (_req: Request, res: Response) => {
+app.get('/api/config', (req: Request, res: Response) => {
+  let cloudUrl = (process.env.APP_URL || '').trim();
+
+  const cloudUrlFile = path.join(DATA_DIR, 'cloud-url.txt');
+  if (!cloudUrl && fs.existsSync(cloudUrlFile)) {
+    try {
+      cloudUrl = fs.readFileSync(cloudUrlFile, 'utf8').trim();
+    } catch {}
+  }
+
+  // Auto-detect public host from request if accessing via a public cloud domain
+  if (!cloudUrl) {
+    const host = (req.get('x-forwarded-host') || req.get('host') || '').trim();
+    const proto = (req.get('x-forwarded-proto') || req.protocol || 'http').trim();
+    if (host && !host.includes('localhost') && !host.includes('127.0.0.1')) {
+      cloudUrl = `${proto}://${host}`;
+    }
+  }
+
   res.json({
     googleClientId: GOOGLE_CLIENT_ID,
-    hasRegisteredTeacher: hasAnyRegisteredTeacher()
+    hasRegisteredTeacher: hasAnyRegisteredTeacher(),
+    cloudUrl
   });
+});
+
+app.post('/api/config/cloud-url', requireTeacher, (req: AuthedRequest, res: Response) => {
+  const url = String(req.body?.cloudUrl || '').trim();
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    const cloudUrlFile = path.join(DATA_DIR, 'cloud-url.txt');
+    fs.writeFileSync(cloudUrlFile, url, 'utf8');
+    res.json({ success: true, cloudUrl: url });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: 'Could not save cloud URL.' });
+  }
 });
 
 /**

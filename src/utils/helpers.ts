@@ -51,11 +51,36 @@ export function formatTime(totalSeconds: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
+let configuredCloudUrl: string = '';
+
+export function setConfiguredCloudUrl(url: string | null | undefined) {
+  if (url && typeof url === 'string') {
+    configuredCloudUrl = url.trim().replace(/\/+$/, '');
+  }
+}
+
+export function getConfiguredCloudUrl(): string {
+  if (typeof window !== 'undefined') {
+    const local = localStorage.getItem('scholarflow_cloud_url');
+    if (local && local.trim()) return local.trim().replace(/\/+$/, '');
+  }
+  if (configuredCloudUrl) return configuredCloudUrl;
+  if (typeof window !== 'undefined' && window.location.origin) {
+    const origin = window.location.origin;
+    if (!origin.includes('localhost') && !origin.includes('127.0.0.1')) {
+      return origin.replace(/\/+$/, '');
+    }
+  }
+  return '';
+}
+
 export function getExamShareUrl(examCode: string): string {
-  if (typeof window === 'undefined') return `?exam=${examCode}`;
-  const origin = window.location.origin;
-  const pathname = window.location.pathname;
-  return `${origin}${pathname}?exam=${encodeURIComponent(examCode)}`;
+  const cloudUrl = getConfiguredCloudUrl();
+  const base = cloudUrl || (typeof window !== 'undefined' ? window.location.origin : '');
+  const prefix = base ? base.replace(/\/+$/, '') : '';
+  const pathname = typeof window !== 'undefined' ? window.location.pathname : '/';
+  const cleanPath = pathname === '/' ? '' : pathname;
+  return `${prefix}${cleanPath}?exam=${encodeURIComponent(examCode)}`;
 }
 
 export function getExamInviteMessage(examTitle: string, examCode: string, timeMins: number): string {

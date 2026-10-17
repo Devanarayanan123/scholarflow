@@ -7,6 +7,8 @@
     "dev": "tsx server.ts",
     "build": "vite build",
     "start": "tsx server.ts",
+    "tunnel": ".\\tools\\cloudflared.exe tunnel --url http://localhost:3000",
+    "cloud": "powershell -ExecutionPolicy Bypass -File ./run-cloud.ps1",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit"

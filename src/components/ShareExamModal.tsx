@@ -10,10 +10,13 @@ import {
   ShieldCheck,
   Clock,
   BookOpen,
-  QrCode
+  QrCode,
+  Cloud,
+  Globe,
+  AlertTriangle
 } from 'lucide-react';
 import { Exam } from '../types';
-import { copyTextToClipboard, getExamInviteMessage, getExamShareUrl } from '../utils/helpers';
+import { copyTextToClipboard, getExamInviteMessage, getExamShareUrl, setConfiguredCloudUrl } from '../utils/helpers';
 
 interface ShareExamModalProps {
   isOpen: boolean;
@@ -103,9 +106,32 @@ export const ShareExamModal: React.FC<ShareExamModalProps> = ({
 
         {/* Direct Link Input & Copy Button */}
         <div className="space-y-2">
-          <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300">
-            Direct Student Join Link (Auto-loads Exam)
-          </label>
+          <div className="flex items-center justify-between">
+            <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300">
+              Direct Student Join Link (Auto-loads Exam)
+            </label>
+            {!shareUrl.includes('localhost') && !shareUrl.includes('127.0.0.1') ? (
+              <span className="text-[11px] font-semibold text-emerald-400 flex items-center gap-1 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                <Cloud className="w-3 h-3" /> Public Cloud Link
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  const cloudTunnel = 'https://katie-joke-revolution-get.trycloudflare.com';
+                  if (typeof window !== 'undefined') {
+                    localStorage.setItem('scholarflow_cloud_url', cloudTunnel);
+                  }
+                  setConfiguredCloudUrl(cloudTunnel);
+                  onShowToast('Switched to live Cloud URL!');
+                }}
+                className="text-[11px] font-semibold text-amber-400 hover:text-amber-300 flex items-center gap-1 bg-amber-500/10 hover:bg-amber-500/20 px-2 py-0.5 rounded border border-amber-500/20 transition cursor-pointer"
+                title="Click to use live Cloudflare Tunnel URL instead of localhost"
+              >
+                <AlertTriangle className="w-3 h-3" /> Localhost (Click to use Cloud Link)
+              </button>
+            )}
+          </div>
           <div className="flex items-center gap-2">
             <input
               type="text"

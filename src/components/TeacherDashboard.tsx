@@ -22,7 +22,10 @@ import {
   ChevronDown,
   ChevronUp,
   RefreshCw,
-  FileCheck2
+  FileCheck2,
+  Globe,
+  Cloud,
+  Link2
 } from 'lucide-react';
 import {
   BarChart,
@@ -36,7 +39,7 @@ import {
 } from 'recharts';
 import { Exam, Submission } from '../types';
 import { TeacherProfile } from '../utils/api';
-import { copyTextToClipboard, formatTime, getExamShareUrl } from '../utils/helpers';
+import { copyTextToClipboard, formatTime, getExamShareUrl, getConfiguredCloudUrl, setConfiguredCloudUrl } from '../utils/helpers';
 import { GeminiQuizGenerator } from './GeminiQuizGenerator';
 import { ShareExamModal } from './ShareExamModal';
 
@@ -45,6 +48,8 @@ interface TeacherDashboardProps {
   exams: Exam[];
   submissions: Submission[];
   isRefreshing: boolean;
+  cloudUrl?: string;
+  onSaveCloudUrl?: (url: string) => Promise<boolean>;
   onRefreshResults: () => void;
   onSaveExam: (exam: Exam) => void;
   onExamGenerated: (exam: Exam) => void;
@@ -60,6 +65,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   exams,
   submissions,
   isRefreshing,
+  cloudUrl,
+  onSaveCloudUrl,
   onRefreshResults,
   onSaveExam,
   onExamGenerated,
@@ -75,6 +82,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [quizFilter, setQuizFilter] = useState<string>('ALL');
   const [sortBy, setSortBy] = useState<'recent' | 'score_desc' | 'time_asc'>('recent');
+
+  // Cloud Domain & Public URL Configuration
+  const [showCloudModal, setShowCloudModal] = useState(false);
+  const [cloudInput, setCloudInput] = useState(() => getConfiguredCloudUrl() || cloudUrl || '');
+  const [isSavingCloud, setIsSavingCloud] = useState(false);
 
   // Expanded student submission ID to inspect which questions the student got right and wrong
   const [expandedSubmissionId, setExpandedSubmissionId] = useState<string | null>(null);
@@ -355,6 +367,19 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
+          <button
+            type="button"
+            onClick={() => {
+              setCloudInput(getConfiguredCloudUrl() || cloudUrl || '');
+              setShowCloudModal(true);
+            }}
+            className="px-3.5 py-2 rounded-xl bg-indigo-600/15 hover:bg-indigo-600/25 active:scale-[0.98] text-xs font-semibold text-indigo-300 flex items-center gap-1.5 border border-indigo-500/30 transition shadow-sm"
+            title="Configure Cloud Domain for Student Links"
+          >
+            <Globe className="w-3.5 h-3.5 text-indigo-400" />
+            <span>{getConfiguredCloudUrl() || cloudUrl ? 'Cloud Link Ready' : 'Set Cloud Link'}</span>
+          </button>
+
           <button
             type="button"
             onClick={onRefreshResults}
@@ -1203,6 +1228,127 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         onClose={() => setShareExamTarget(null)}
         onShowToast={onShowToast}
       />
+
+      {/* Cloud Domain / Public URL Settings Modal */}
+      {showCloudModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 sm:p-7 shadow-2xl relative space-y-5">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center text-indigo-400">
+                  <Globe className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white tracking-tight">Public Cloud Domain</h3>
+                  <p className="text-xs text-slate-400">Configure the public URL used for student links and QR codes</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCloudModal(false)}
+                className="text-slate-400 hover:text-slate-200 p-1.5 rounded-lg hover:bg-slate-800 transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 space-y-1.5">
+              <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
+                <Cloud className="w-4 h-4" />
+                <span>No More Localhost Links</span>
+              </div>
+              <p className="text-slate-400 leading-relaxed">
+                When students take your quiz from their phones, tablets, or home computers, they need a public internet link.
+                All quiz share links, WhatsApp invites, and QR codes generated by ScholarFlow will use this domain.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-300">
+                Public Cloud URL
+              </label>
+              <input
+                type="url"
+                value={cloudInput}
+                onChange={(e) => setCloudInput(e.target.value)}
+                placeholder="https://your-app.trycloudflare.com or https://your-site.onrender.com"
+                className="w-full rounded-xl bg-slate-950 border border-slate-800 focus:border-indigo-500 px-3.5 py-2.5 text-xs font-mono text-slate-100 outline-none"
+              />
+            </div>
+
+            {/* Quick Actions & Suggested Links */}
+            <div className="space-y-2 pt-1">
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const sample = 'https://katie-joke-revolution-get.trycloudflare.com';
+                    setCloudInput(sample);
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 text-[11px] font-mono text-indigo-300 transition"
+                >
+                  ⚡ Use Live Cloudflare Tunnel
+                </button>
+                {cloudInput && (
+                  <button
+                    type="button"
+                    onClick={() => window.open(cloudInput, '_blank', 'noopener')}
+                    className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] text-slate-300 flex items-center gap-1 transition"
+                  >
+                    <span>Test Open Cloud Site</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => {
+                  setCloudInput('');
+                  if (typeof window !== 'undefined') {
+                    localStorage.removeItem('scholarflow_cloud_url');
+                  }
+                  setConfiguredCloudUrl('');
+                  onShowToast('Reset to auto-detect origin');
+                  setShowCloudModal(false);
+                }}
+                className="px-3.5 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-slate-200 transition"
+              >
+                Reset to Auto
+              </button>
+              <button
+                type="button"
+                disabled={isSavingCloud}
+                onClick={async () => {
+                  setIsSavingCloud(true);
+                  try {
+                    const cleaned = cloudInput.trim().replace(/\/+$/, '');
+                    if (onSaveCloudUrl) {
+                      await onSaveCloudUrl(cleaned);
+                    } else {
+                      if (typeof window !== 'undefined') {
+                        localStorage.setItem('scholarflow_cloud_url', cleaned);
+                      }
+                      setConfiguredCloudUrl(cleaned);
+                      onShowToast('Cloud Domain saved!');
+                    }
+                    setShowCloudModal(false);
+                  } catch (err: any) {
+                    onShowToast(err?.message || 'Could not save Cloud Domain', 'error');
+                  } finally {
+                    setIsSavingCloud(false);
+                  }
+                }}
+                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:scale-[0.98] text-white font-bold text-xs shadow-lg shadow-indigo-600/25 transition disabled:opacity-50"
+              >
+                {isSavingCloud ? 'Saving...' : 'Save Cloud Domain'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

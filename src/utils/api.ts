@@ -38,9 +38,14 @@ async function request<T = any>(url: string, options: RequestInit = {}): Promise
 const json = (body: unknown) => JSON.stringify(body);
 
 export const api = {
-  // Auth
+  // Auth & Cloud Configuration
   getConfig: () =>
-    request<{ googleClientId: string; hasRegisteredTeacher: boolean }>('/api/config'),
+    request<{ googleClientId: string; hasRegisteredTeacher: boolean; cloudUrl?: string }>('/api/config'),
+  saveCloudUrl: (cloudUrl: string) =>
+    request<{ success: boolean; cloudUrl: string }>('/api/config/cloud-url', {
+      method: 'POST',
+      body: json({ cloudUrl })
+    }),
   getCurrentTeacher: async (): Promise<TeacherProfile | null> => {
     try {
       const data = await request<{ teacher: TeacherProfile }>('/api/auth/me');

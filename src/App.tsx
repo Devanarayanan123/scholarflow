@@ -3,7 +3,7 @@ import { BookOpen, CheckCircle2, AlertTriangle, LogOut, Loader2 } from 'lucide-r
 import { Exam, Submission } from './types';
 import { api, TeacherProfile } from './utils/api';
 import { clearLegacyBrowserData, disableGoogleAutoSelect } from './utils/auth';
-import { getExamShareUrl } from './utils/helpers';
+import { getExamShareUrl, setConfiguredCloudUrl } from './utils/helpers';
 import { StudentPortal } from './components/StudentPortal';
 import { TeacherDashboard } from './components/TeacherDashboard';
 import { TeacherLogin } from './components/TeacherLogin';
@@ -91,7 +91,11 @@ const AppHeader: React.FC<{ right?: React.ReactNode }> = ({ right }) => (
 
 const TeacherArea: React.FC<{ showToast: ShowToast }> = ({ showToast }) => {
   const [status, setStatus] = useState<'loading' | 'signedOut' | 'signedIn'>('loading');
-  const [config, setConfig] = useState({ googleClientId: '', hasRegisteredTeacher: false });
+  const [config, setConfig] = useState<{ googleClientId: string; hasRegisteredTeacher: boolean; cloudUrl?: string }>({
+    googleClientId: '',
+    hasRegisteredTeacher: false,
+    cloudUrl: ''
+  });
   const [teacher, setTeacher] = useState<TeacherProfile | null>(null);
   const [exams, setExams] = useState<Exam[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
@@ -134,6 +138,9 @@ const TeacherArea: React.FC<{ showToast: ShowToast }> = ({ showToast }) => {
         const [cfg, current] = await Promise.all([api.getConfig(), api.getCurrentTeacher()]);
         if (cancelled) return;
         setConfig(cfg);
+        if (cfg.cloudUrl) {
+          setConfiguredCloudUrl(cfg.cloudUrl);
+        }
         if (current) {
           setTeacher(current);
           await loadTeacherData();
@@ -279,6 +286,22 @@ const TeacherArea: React.FC<{ showToast: ShowToast }> = ({ showToast }) => {
     }
   };
 
+  const handleSaveCloudUrl = async (newUrl: string) => {
+    try {
+      const res = await api.saveCloudUrl(newUrl);
+      setConfig((prev) => ({ ...prev, cloudUrl: res.cloudUrl }));
+      setConfiguredCloudUrl(res.cloudUrl);
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('scholarflow_cloud_url', res.cloudUrl);
+      }
+      showToast(newUrl ? 'Cloud Domain updated!' : 'Reset to default domain');
+      return true;
+    } catch (err: any) {
+      handleApiError(err);
+      return false;
+    }
+  };
+
   return (
     <>
       <AppHeader
@@ -332,6 +355,8 @@ const TeacherArea: React.FC<{ showToast: ShowToast }> = ({ showToast }) => {
             exams={exams}
             submissions={submissions}
             isRefreshing={isRefreshing}
+            cloudUrl={config.cloudUrl}
+            onSaveCloudUrl={handleSaveCloudUrl}
             onRefreshResults={() => refreshSubmissions(false)}
             onSaveExam={handleSaveExam}
             onExamGenerated={handleExamGenerated}
