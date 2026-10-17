@@ -1282,7 +1282,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 <button
                   type="button"
                   onClick={() => {
-                    const sample = 'https://katie-joke-revolution-get.trycloudflare.com';
+                    const sample = cloudUrl || 'https://nat-attended-april-las.trycloudflare.com';
                     setCloudInput(sample);
                   }}
                   className="px-2.5 py-1.5 rounded-lg bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 text-[11px] font-mono text-indigo-300 transition"

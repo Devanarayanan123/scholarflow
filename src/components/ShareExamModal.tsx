@@ -118,7 +118,7 @@ export const ShareExamModal: React.FC<ShareExamModalProps> = ({
               <button
                 type="button"
                 onClick={() => {
-                  const cloudTunnel = 'https://katie-joke-revolution-get.trycloudflare.com';
+                  const cloudTunnel = 'https://nat-attended-april-las.trycloudflare.com';
                   if (typeof window !== 'undefined') {
                     localStorage.setItem('scholarflow_cloud_url', cloudTunnel);
                   }

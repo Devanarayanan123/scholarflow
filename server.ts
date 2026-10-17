@@ -314,22 +314,30 @@ function toStudentExam(exam: StoredExam): Exam {
 // Auth & Cloud routes
 // ---------------------------------------------------------------------------
 app.get('/api/config', (req: Request, res: Response) => {
-  let cloudUrl = (process.env.APP_URL || '').trim();
-
+  let cloudUrl = '';
   const cloudUrlFile = path.join(DATA_DIR, 'cloud-url.txt');
+
+  // 1. Auto-detect public host from request if accessing via a public cloud domain
+  const host = (req.get('x-forwarded-host') || req.get('host') || '').trim();
+  const proto = (req.get('x-forwarded-proto') || req.protocol || 'https').split(',')[0].trim();
+  if (host && !host.includes('localhost') && !host.includes('127.0.0.1')) {
+    cloudUrl = `${proto}://${host}`;
+    try {
+      if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+      fs.writeFileSync(cloudUrlFile, cloudUrl, 'utf8');
+    } catch {}
+  }
+
+  // 2. Read saved cloud URL from data/cloud-url.txt
   if (!cloudUrl && fs.existsSync(cloudUrlFile)) {
     try {
       cloudUrl = fs.readFileSync(cloudUrlFile, 'utf8').trim();
     } catch {}
   }
 
-  // Auto-detect public host from request if accessing via a public cloud domain
+  // 3. Fallback to APP_URL environment variable
   if (!cloudUrl) {
-    const host = (req.get('x-forwarded-host') || req.get('host') || '').trim();
-    const proto = (req.get('x-forwarded-proto') || req.protocol || 'http').trim();
-    if (host && !host.includes('localhost') && !host.includes('127.0.0.1')) {
-      cloudUrl = `${proto}://${host}`;
-    }
+    cloudUrl = (process.env.APP_URL || '').trim();
   }
 
   res.json({
@@ -719,380 +727,416 @@ app.post('/api/public/exams/:code/submit', (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
-// Dynamic Gemini AI Quiz Synthesis (powered by Teacher's initial Gmail session)
+// Real AI Quiz Generation (Topic, Syllabus, YouTube Video Metadata/Transcript, & Files)
 // ---------------------------------------------------------------------------
-function synthesizeCurriculumQuiz(
-  topic: string,
-  content: string,
-  sourceType: string,
-  difficulty: string,
-  count: number,
-  points: number
-) {
-  const cleanSubject = topic.trim() || 'Academic Assessment';
-  const combinedText = `${topic}\n${content}`.trim();
-  const lower = combinedText.toLowerCase();
 
-  // Extract meaningful key concepts or syllabus units if the teacher pasted syllabus/notes
-  const extractedLines = combinedText
-    .split(/[\n.;•\-]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length >= 12 && s.length <= 180 && !/^https?:\/\//i.test(s));
+function extractYouTubeVideoId(rawUrl: string): string | null {
+  try {
+    const trimmed = rawUrl.trim();
+    const u = new URL(trimmed);
+    const host = u.hostname.toLowerCase();
+    if (host === 'youtu.be') {
+      const id = u.pathname.split('/').filter(Boolean)[0];
+      return id ? id.slice(0, 20) : null;
+    }
+    if (host.includes('youtube.com') || host.includes('youtube-nocookie.com')) {
+      const v = u.searchParams.get('v');
+      if (v) return v.slice(0, 20);
+      const parts = u.pathname.split('/').filter(Boolean);
+      if ((parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live' || parts[0] === 'v') && parts[1]) {
+        return parts[1].slice(0, 20);
+      }
+    }
+  } catch {
+    // Fallback regex
+    const m = rawUrl.match(/(?:v=|youtu\.be\/|\/embed\/|\/shorts\/|\/live\/)([a-zA-Z0-9_-]{11})/);
+    if (m) return m[1];
+  }
+  return null;
+}
 
-  let subjectName = cleanSubject;
-  let questionPool: Array<{ q: string; options: string[]; correctIndex: number; explanation: string }> = [];
+function decodeHtmlEntities(str: string): string {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_m, code) => String.fromCharCode(Number(code)));
+}
 
-  if (extractedLines.length >= 3 && sourceType === 'syllabus') {
-    // Build tailored questions directly from the teacher's pasted syllabus units/sentences
-    subjectName = cleanSubject.slice(0, 60);
-    questionPool = extractedLines.map((unitText, idx) => {
-      const shortUnit = unitText.length > 95 ? `${unitText.slice(0, 92)}...` : unitText;
-      const correctIdx = idx % 4;
-      const distractors = [
-        'Replacing empirical verification with uncalibrated qualitative assumptions',
-        'Bypassing foundational invariants in favor of unconstrained heuristics',
-        'Eliminating boundary conditions and structural consistency checks'
-      ];
-      const correctAnswer = `Mastering the core principles, analytical methods, and applications of: "${shortUnit}"`;
-      const options = [...distractors];
-      options.splice(correctIdx, 0, correctAnswer);
+async function fetchYouTubeVideoContext(rawUrl: string): Promise<{
+  videoTitle: string;
+  authorName: string;
+  description: string;
+  keywords: string[];
+  transcript: string;
+}> {
+  const videoId = extractYouTubeVideoId(rawUrl);
+  const canonicalUrl = videoId ? `https://www.youtube.com/watch?v=${videoId}` : rawUrl.trim();
 
-      return {
-        q: `In the curriculum syllabus, what is the primary learning objective regarding "${shortUnit}"?`,
-        options: options.slice(0, 4),
-        correctIndex: correctIdx,
-        explanation: `This syllabus unit focuses directly on understanding and applying "${shortUnit}".`
-      };
-    });
-  } else if (
-    lower.includes('comput') ||
-    lower.includes('cs') ||
-    lower.includes('code') ||
-    lower.includes('program') ||
-    lower.includes('data') ||
-    lower.includes('algorithm') ||
-    lower.includes('software')
-  ) {
-    subjectName = cleanSubject || 'Computer Science & Software Engineering';
-    questionPool = [
-      {
-        q: 'What is the primary guarantee of ACID transactions in relational and distributed databases?',
-        options: [
-          'Atomicity, Consistency, Isolation, and Durability ensure state changes succeed completely or rollback without corruption.',
-          'Arbitrary cache invalidation and probabilistic consensus without distributed commits.',
-          'Asynchronous eventual consistency without strict serializability or mutex locking.',
-          'Lossy data compression across disk partitions to minimize storage overhead.'
-        ],
-        correctIndex: 0,
-        explanation: 'ACID guarantees that database transactions are processed reliably, maintaining invariants even during system faults.'
-      },
-      {
-        q: 'In algorithmic complexity analysis, what is the tight asymptotic time complexity of Merge Sort for N items?',
-        options: ['O(N^2)', 'O(N log N)', 'O(log N)', 'O(N!)'],
-        correctIndex: 1,
-        explanation: 'Merge Sort divides the array in log(N) levels and merges in O(N) work per level, giving O(N log N) worst-case time.'
-      },
-      {
-        q: 'Which synchronization primitive prevents race conditions by allowing only one thread into a critical section?',
-        options: ['Circular Ring Buffer', 'Non-blocking Counter', 'Mutual Exclusion Lock (Mutex)', 'Stream Reader'],
-        correctIndex: 2,
-        explanation: 'A Mutex enforces mutual exclusion so concurrent threads cannot corrupt shared mutable state.'
-      },
-      {
-        q: 'Which data structure provides O(1) average-case time complexity for key-value lookups and insertions?',
-        options: ['Singly Linked List', 'Hash Table (Hash Map)', 'Binary Search Tree', 'Min-Heap Priority Queue'],
-        correctIndex: 1,
-        explanation: 'Hash tables compute an index from the key using a hash function, enabling constant-time O(1) average lookup.'
-      },
-      {
-        q: 'In the CAP theorem for distributed data stores, which three properties cannot all be guaranteed simultaneously during a network partition?',
-        options: [
-          'Caching, Authentication, and Persistence',
-          'Concurrency, Atomicity, and Pipelining',
-          'Consistency, Availability, and Partition Tolerance',
-          'Compression, Allocation, and Parallelism'
-        ],
-        correctIndex: 2,
-        explanation: 'Brewer’s CAP theorem states that a distributed system can deliver at most two of Consistency, Availability, and Partition Tolerance simultaneously.'
-      },
-      {
-        q: 'What is the primary purpose of Virtual Memory paging in modern operating systems?',
-        options: [
-          'To overclock CPU registers during floating-point operations',
-          'To disable hardware interrupts from peripheral devices',
-          'To encrypt network packets at the data-link layer',
-          'To provide each process with an isolated virtual address space mapped to physical RAM and disk pages'
-        ],
-        correctIndex: 3,
-        explanation: 'Virtual memory decouples process virtual addresses from physical RAM frames using page tables and the MMU.'
-      },
-      {
-        q: 'Which graph traversal algorithm uses a FIFO queue to compute the shortest path in an unweighted graph?',
-        options: ['Breadth-First Search (BFS)', 'Depth-First Search (DFS)', 'Kruskal Minimum Spanning Tree', 'Topological Sort'],
-        correctIndex: 0,
-        explanation: 'BFS explores vertices in layers of increasing distance from the source using a FIFO queue.'
-      },
-      {
-        q: 'In RESTful API design, which HTTP method is specified by RFC 9110 to be idempotent for complete resource replacement?',
-        options: ['PUT', 'POST', 'PATCH', 'CONNECT'],
-        correctIndex: 0,
-        explanation: 'HTTP PUT is idempotent; multiple identical PUT requests produce the same server state as a single request.'
-      },
-      {
-        q: 'In TLS/HTTPS handshakes, why is asymmetric public-key cryptography combined with symmetric session keys?',
-        options: [
-          'Symmetric encryption cannot encrypt binary payloads',
-          'Asymmetric cryptography securely exchanges keys, while symmetric encryption provides fast bulk data transfer',
-          'Public keys are only valid for HTTP GET headers',
-          'Browsers do not support block ciphers like AES-GCM'
-        ],
-        correctIndex: 1,
-        explanation: 'Hybrid cryptography uses asymmetric keys for authentication and key exchange, then uses fast symmetric ciphers like AES for session traffic.'
-      },
-      {
-        q: 'What role does a Reverse Proxy play in distributed web architecture?',
-        options: [
-          'Compiles client JavaScript into machine bytecode on user devices',
-          'Replaces database storage engines with ephemeral RAM buffers',
-          'Simulates network packet drops during security audits',
-          'Routes client requests to backend servers while handling load balancing, TLS termination, and caching'
-        ],
-        correctIndex: 3,
-        explanation: 'Reverse proxies sit in front of backend servers to provide load balancing, security, and caching.'
-      }
-    ];
-  } else if (
-    lower.includes('physic') ||
-    lower.includes('electr') ||
-    lower.includes('wave') ||
-    lower.includes('force') ||
-    lower.includes('thermo')
-  ) {
-    subjectName = cleanSubject || 'Physics & Classical Mechanics';
-    questionPool = [
-      {
-        q: "According to Faraday's Law of Electromagnetic Induction, what is induced by a time-varying magnetic flux through a closed loop?",
-        options: [
-          'An Electromotive Force (EMF) proportional to the negative rate of change of magnetic flux',
-          'A constant electrostatic potential with zero curl',
-          'A loss of gravitational potential energy in the surrounding field',
-          'A spontaneous decrease in conductor resistance'
-        ],
-        correctIndex: 0,
-        explanation: "Faraday's law states that EMF = -dPhi/dt, where the negative sign reflects Lenz's Law."
-      },
-      {
-        q: 'In wave mechanics, what phenomenon occurs when a periodic driving frequency matches a system’s natural frequency?',
-        options: ['Total destructive attenuation', 'Resonance with maximal amplitude response', 'Phase inversion without oscillation', 'Adiabatic expansion'],
-        correctIndex: 1,
-        explanation: 'Resonance occurs when the driving frequency matches the natural resonant frequency, maximizing energy transfer.'
-      },
-      {
-        q: 'What is the theoretical maximum thermal efficiency of an ideal Carnot engine operating between hot reservoir T_H and cold reservoir T_C?',
-        options: ['1 - (T_C / T_H)', 'T_H / (T_H + T_C)', '(T_H - T_C) / T_C', '1 - (T_H / T_C)^2'],
-        correctIndex: 0,
-        explanation: 'Carnot efficiency depends strictly on the absolute Kelvin temperatures: eta = 1 - T_C / T_H.'
-      },
-      {
-        q: 'What is the escape velocity from a spherical mass M of radius R?',
-        options: ['v = 2GM / R^2', 'v = sqrt(GM * R)', 'v = GM / (2 * pi * R)', 'v = sqrt(2GM / R)'],
-        correctIndex: 3,
-        explanation: 'Equating kinetic energy (1/2 m v^2) and gravitational potential energy (G M m / R) gives v = sqrt(2GM/R).'
-      },
-      {
-        q: 'According to Gauss’s Law for electricity, the net electric flux through any closed surface equals:',
-        options: [
-          'The surface area of the enclosing sphere',
-          'The external magnetic field strength',
-          'The enclosed net electric charge divided by vacuum permittivity (Q_enc / epsilon_0)',
-          'Zero for all charge distributions'
-        ],
-        correctIndex: 2,
-        explanation: 'Gauss’s Law states that total electric flux through a closed surface is Q_enclosed / epsilon_0.'
-      },
-      {
-        q: 'When light travels from a higher refractive index (n1) to a lower refractive index (n2) above the critical angle, what occurs?',
-        options: ['Chromatic dispersion without reflection', 'Brewster absorption', 'Diffraction splitting', 'Total Internal Reflection'],
-        correctIndex: 3,
-        explanation: 'Above the critical angle arcsin(n2/n1), 100% of incident light reflects back into the denser medium.'
-      },
-      {
-        q: 'For an ideal gas undergoing an isothermal process at constant temperature, how are pressure (P) and volume (V) related?',
-        options: ['P * V = constant (Boyle’s Law)', 'P / V = constant', 'P * V^2 = 0', 'P + V = constant'],
-        correctIndex: 0,
-        explanation: 'From PV = nRT, keeping T constant makes the product PV constant.'
-      },
-      {
-        q: 'What is the SI unit of magnetic flux density (B-field)?',
-        options: ['Weber (Wb)', 'Tesla (T)', 'Henry (H)', 'Farad (F)'],
-        correctIndex: 1,
-        explanation: 'Magnetic flux density B is measured in Tesla (T), equal to 1 Weber per square meter.'
-      }
-    ];
-  } else if (lower.includes('bio') || lower.includes('gene') || lower.includes('cell') || lower.includes('dna')) {
-    subjectName = cleanSubject || 'Biological Sciences & Genetics';
-    questionPool = [
-      {
-        q: 'During eukaryotic cellular respiration, which stage produces the majority of ATP via oxidative phosphorylation?',
-        options: [
-          'The Electron Transport Chain and ATP Synthase across the inner mitochondrial membrane',
-          'Cytoplasmic Glycolysis breaking glucose into pyruvate',
-          'Anaerobic Lactic Acid Fermentation in the cytosol',
-          'Nuclear transcription of ribosomal RNA'
-        ],
-        correctIndex: 0,
-        explanation: 'Oxidative phosphorylation uses the mitochondrial proton gradient to synthesize ~28-32 ATP per glucose molecule.'
-      },
-      {
-        q: 'Which enzyme synthesizes complementary DNA strands by adding nucleotides in the 5-prime to 3-prime direction?',
-        options: ['RNA Helicase', 'DNA Polymerase', 'Topoisomerase I', 'Peptidyl Transferase'],
-        correctIndex: 1,
-        explanation: 'DNA Polymerase reads the template 3-prime to 5-prime and synthesizes the new strand 5-prime to 3-prime.'
-      },
-      {
-        q: 'What is the primary evolutionary role of Meiosis in sexually reproducing organisms?',
-        options: [
-          'Producing genetically identical diploid cells for tissue repair',
-          'Synthesizing membrane phospholipids',
-          'Generating genetically diverse haploid gametes via crossing over and independent assortment',
-          'Degrading mRNA transcripts prior to mitosis'
-        ],
-        correctIndex: 2,
-        explanation: 'Meiosis halves the chromosome number while generating genetic diversity.'
-      },
-      {
-        q: 'Where do the light-dependent reactions of photosynthesis occur within plant chloroplasts?',
-        options: ['Thylakoid membranes', 'Cytosolic matrix', 'Outer mitochondrial membrane', 'Nucleolus'],
-        correctIndex: 0,
-        explanation: 'Photosystems I and II are embedded in the thylakoid membranes.'
-      },
-      {
-        q: 'Which organelle modifies, sorts, and packages proteins from the rough ER for secretion?',
-        options: ['Peroxisome', 'Centrosome', 'Golgi Apparatus', 'Ribosome'],
-        correctIndex: 2,
-        explanation: 'The Golgi apparatus processes and packages proteins from the rough endoplasmic reticulum.'
-      },
-      {
-        q: 'What type of chemical bond links amino acids together into a polypeptide chain during translation?',
-        options: ['Hydrogen bond', 'Ionic salt bridge', 'Phosphodiester bond', 'Covalent Peptide bond'],
-        correctIndex: 3,
-        explanation: 'Ribosomes catalyze dehydration synthesis to form covalent peptide bonds between amino acids.'
-      }
-    ];
-  } else {
-    subjectName = cleanSubject;
-    questionPool = [
-      {
-        q: `What is the foundational analytical principle governing ${cleanSubject}?`,
-        options: [
-          `Systematic empirical evidence, structured models, and verifiable principles of ${cleanSubject}`,
-          'Unverified assumptions without reproducible measurements',
-          'Random qualitative heuristics that reject analytical validation',
-          'Isolated observations without controlled variables'
-        ],
-        correctIndex: 0,
-        explanation: `Rigorous study of ${cleanSubject} relies on structured analytical models and verifiable evidence.`
-      },
-      {
-        q: `Which methodology provides the most reliable verification when studying ${cleanSubject}?`,
-        options: [
-          'Subjective anecdote without baseline controls',
-          'Controlled quantitative analysis with explicit variables and reproducible metrics',
-          'Extrapolating single outlier cases across unrelated domains',
-          'Uncalibrated estimation without peer review'
-        ],
-        correctIndex: 1,
-        explanation: `Controlled analysis and reproducible measurement are essential for verifying results in ${cleanSubject}.`
-      },
-      {
-        q: `Why is predictive modeling important in advanced applications of ${cleanSubject}?`,
-        options: [
-          'It removes the need to test against real-world data',
-          'It guarantees zero variance regardless of input changes',
-          'It allows evaluating counterfactual scenarios and projecting system behavior under changing parameters',
-          'It replaces quantitative measurement with informal descriptions'
-        ],
-        correctIndex: 2,
-        explanation: `Predictive models allow testing how changes in parameters affect outcomes in ${cleanSubject}.`
-      },
-      {
-        q: `How does sensitivity analysis improve problem-solving in ${cleanSubject}?`,
-        options: [
-          'By quantifying how variations in input parameters impact overall outcomes and stability',
-          'By eliminating boundary conditions from analytical models',
-          'By forcing experimental data to fit a predetermined conclusion',
-          'By reducing sample sizes below statistical significance'
-        ],
-        correctIndex: 0,
-        explanation: `Sensitivity analysis identifies which variables have the strongest influence on outcomes in ${cleanSubject}.`
-      },
-      {
-        q: `What distinguishes a testable hypothesis in ${cleanSubject} from an unverified claim?`,
-        options: [
-          'It relies solely on authority rather than observation',
-          'It makes specific, measurable predictions that can be empirically evaluated',
-          'It is phrased broadly enough to match any outcome',
-          'It cannot be independently replicated'
-        ],
-        correctIndex: 1,
-        explanation: `A valid hypothesis in ${cleanSubject} must yield specific, measurable predictions.`
-      },
-      {
-        q: `When evaluating data in ${cleanSubject}, what is a confounding variable?`,
-        options: [
-          'An external factor that influences both the independent and dependent variables, creating a misleading correlation',
-          'A properly randomized control group',
-          'A calibrated measurement instrument with zero drift',
-          'A constant parameter held fixed throughout an experiment'
-        ],
-        correctIndex: 0,
-        explanation: `Confounding variables must be controlled to establish true cause-and-effect relationships in ${cleanSubject}.`
-      },
-      {
-        q: `What is the primary purpose of standardization and calibration in ${cleanSubject}?`,
-        options: [
-          'Restricting access to reference datasets',
-          'Introducing systematic bias into measurements',
-          'Preventing cross-disciplinary comparison',
-          'Ensuring results are accurate, consistent, and comparable across independent studies'
-        ],
-        correctIndex: 3,
-        explanation: `Standardization ensures that findings in ${cleanSubject} can be accurately reproduced and compared.`
-      },
-      {
-        q: `Why are systematic meta-analyses valuable when reviewing literature in ${cleanSubject}?`,
-        options: [
-          'They ignore sample size and variance',
-          'They rely on a single qualitative opinion',
-          'They combine data across multiple independent studies to increase statistical power and precision',
-          'They bypass peer review and validation'
-        ],
-        correctIndex: 2,
-        explanation: `Synthesizing multiple independent studies provides a more reliable estimate of true effects in ${cleanSubject}.`
-      }
-    ];
+  let videoTitle = '';
+  let authorName = '';
+  let description = '';
+  let keywords: string[] = [];
+  let transcript = '';
+
+  // 1. Fetch official YouTube oEmbed metadata (fast & reliable title + channel)
+  try {
+    const oembedRes = await fetch(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(canonicalUrl)}&format=json`,
+      { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } }
+    );
+    if (oembedRes.ok) {
+      const oembed: any = await oembedRes.json();
+      videoTitle = String(oembed?.title || '').trim();
+      authorName = String(oembed?.author_name || '').trim();
+    }
+  } catch (err) {
+    console.warn('YouTube oEmbed lookup warning:', err);
   }
 
-  const questions: Question[] = [];
-  for (let i = 0; i < count; i++) {
-    const template = questionPool[i % questionPool.length];
-    questions.push({
-      id: `q_${Date.now()}_${i}`,
-      q:
-        count > questionPool.length && i >= questionPool.length
-          ? `${template.q} (Part ${Math.floor(i / questionPool.length) + 1})`
-          : template.q,
-      options: [...template.options],
-      correctIndex: template.correctIndex,
-      points,
-      explanation: template.explanation
+  // 2. Fetch YouTube watch page to extract full description, topic keywords, and closed captions
+  if (videoId) {
+    try {
+      const watchRes = await fetch(canonicalUrl, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Accept-Language': 'en-US,en;q=0.9'
+        }
+      });
+      if (watchRes.ok) {
+        const html = await watchRes.text();
+
+        if (!videoTitle) {
+          const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
+          if (titleMatch) {
+            videoTitle = decodeHtmlEntities(titleMatch[1].replace(/\s*-\s*YouTube$/i, '').trim());
+          }
+        }
+
+        const descMatch = html.match(/"shortDescription":"((?:[^"\\]|\\.)*)"/);
+        if (descMatch) {
+          try {
+            description = JSON.parse(`"${descMatch[1]}"`).slice(0, 4000);
+          } catch {
+            description = descMatch[1].replace(/\\n/g, '\n').slice(0, 4000);
+          }
+        }
+
+        const kwMatch = html.match(/"keywords":\[([^\]]+)\]/);
+        if (kwMatch) {
+          try {
+            keywords = JSON.parse(`[${kwMatch[1]}]`).map((k: unknown) => String(k));
+          } catch {}
+        }
+
+        // Extract closed-caption transcript track if available
+        const captionMatch = html.match(/"captionTracks":\[(\{[^\]]+\})\]/);
+        if (captionMatch) {
+          try {
+            const tracks = JSON.parse(`[${captionMatch[1]}]`);
+            const enTrack =
+              tracks.find((t: any) => String(t?.languageCode || '').startsWith('en')) || tracks[0];
+            if (enTrack?.baseUrl) {
+              const capRes = await fetch(enTrack.baseUrl);
+              if (capRes.ok) {
+                const capXml = await capRes.text();
+                const lines = Array.from(capXml.matchAll(/<text[^>]*>([\s\S]*?)<\/text>/g)).map((m) =>
+                  decodeHtmlEntities(m[1].replace(/<[^>]+>/g, ' ').trim())
+                );
+                transcript = lines.filter(Boolean).join(' ').slice(0, 6000);
+              }
+            }
+          } catch {}
+        }
+      }
+    } catch (err) {
+      console.warn('YouTube page scrape warning:', err);
+    }
+  }
+
+  return { videoTitle, authorName, description, keywords, transcript };
+}
+
+async function fetchWikipediaContext(topic: string): Promise<string> {
+  const clean = topic.trim().slice(0, 120);
+  if (!clean || clean.length < 2) return '';
+  try {
+    const searchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(
+      clean
+    )}&utf8=&format=json&srlimit=2`;
+    const res = await fetch(searchUrl, {
+      headers: { 'User-Agent': 'ScholarFlowQuizPlatform/1.0' }
     });
+    if (!res.ok) return '';
+    const data: any = await res.json();
+    const firstTitle = data?.query?.search?.[0]?.title;
+    if (!firstTitle) return '';
+
+    const summaryRes = await fetch(
+      `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(firstTitle)}`,
+      { headers: { 'User-Agent': 'ScholarFlowQuizPlatform/1.0' } }
+    );
+    if (!summaryRes.ok) return '';
+    const summaryData: any = await summaryRes.json();
+    return String(summaryData?.extract || '').slice(0, 2500);
+  } catch {
+    return '';
+  }
+}
+
+function extractUploadedFileText(fileName: string, fileMimeType: string, fileData: string): string {
+  if (!fileData) return '';
+  try {
+    const base64Part = fileData.includes(',') ? fileData.split(',')[1] : fileData;
+    const buf = Buffer.from(base64Part, 'base64');
+    const lowerName = (fileName || '').toLowerCase();
+    if (
+      fileMimeType.startsWith('text/') ||
+      lowerName.endsWith('.txt') ||
+      lowerName.endsWith('.md') ||
+      lowerName.endsWith('.csv') ||
+      lowerName.endsWith('.json')
+    ) {
+      return buf.toString('utf8').slice(0, 8000);
+    }
+    // Extract readable ASCII text runs from PDF/DOCX buffers
+    const rawStr = buf.toString('latin1');
+    const matches = rawStr.match(/[A-Za-z0-9 ,.;:'"?!()-]{15,}/g);
+    if (matches && matches.length > 0) {
+      return matches.join(' ').slice(0, 6000);
+    }
+  } catch {}
+  return '';
+}
+
+function parseJsonFromAiResponse(rawText: string): any {
+  const trimmed = rawText.trim();
+  // Remove markdown ```json ... ``` fences if present
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenceMatch ? fenceMatch[1].trim() : trimmed;
+
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    // Try extracting the outermost JSON object {...} or array [...]
+    const firstBrace = candidate.indexOf('{');
+    const lastBrace = candidate.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      return JSON.parse(candidate.slice(firstBrace, lastBrace + 1));
+    }
+    const firstBracket = candidate.indexOf('[');
+    const lastBracket = candidate.lastIndexOf(']');
+    if (firstBracket >= 0 && lastBracket > firstBracket) {
+      return JSON.parse(candidate.slice(firstBracket, lastBracket + 1));
+    }
+    throw new Error('Could not parse JSON from AI response');
+  }
+}
+
+async function generateQuizWithRealAi(params: {
+  sourceType: string;
+  topic: string;
+  content: string;
+  url: string;
+  fileName: string;
+  fileMimeType: string;
+  fileData: string;
+  difficulty: string;
+  count: number;
+  points: number;
+}): Promise<{
+  title: string;
+  subject: string;
+  description: string;
+  questions: Question[];
+}> {
+  const { sourceType, topic, content, url, fileName, fileMimeType, fileData, difficulty, count, points } = params;
+
+  let subjectTitle = topic.trim();
+  let contextBlocks: string[] = [];
+
+  // 1. If source is YouTube, fetch the REAL video title, channel, description, keywords, and transcript
+  if (sourceType === 'youtube' && url) {
+    const yt = await fetchYouTubeVideoContext(url);
+    const effectiveVideoTopic = yt.videoTitle || topic.trim() || 'Educational Video Topic';
+    subjectTitle = topic.trim() ? `${topic.trim()} (${yt.videoTitle || 'Video'})` : effectiveVideoTopic;
+
+    if (yt.videoTitle) {
+      contextBlocks.push(`YouTube Video Title: ${yt.videoTitle}`);
+    }
+    if (yt.authorName) {
+      contextBlocks.push(`Channel / Instructor: ${yt.authorName}`);
+    }
+    if (yt.keywords.length > 0) {
+      contextBlocks.push(`Video Topic Keywords: ${yt.keywords.slice(0, 25).join(', ')}`);
+    }
+    if (yt.description) {
+      contextBlocks.push(`Video Description & Lecture Notes:\n${yt.description}`);
+    }
+    if (yt.transcript) {
+      contextBlocks.push(`Video Spoken Transcript Excerpt:\n${yt.transcript}`);
+    }
+    if (content.trim()) {
+      contextBlocks.push(`Teacher's Specific Focus Instructions: ${content.trim()}`);
+    }
+    // Also fetch Wikipedia reference for the video's subject if transcript wasn't available
+    if (!yt.transcript && yt.videoTitle) {
+      const cleanedTitle = yt.videoTitle
+        .replace(/\(.*?\)|\[.*?\]/g, '')
+        .replace(/full course|tutorial|lecture|explained|crash course|in \d+ minutes/gi, '')
+        .trim();
+      const wiki = await fetchWikipediaContext(cleanedTitle);
+      if (wiki) contextBlocks.push(`Factual Reference Summary on "${cleanedTitle}":\n${wiki}`);
+    }
+  } else if (sourceType === 'document' || sourceType === 'file') {
+    const cleanFileTitle = (fileName || '').replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim();
+    subjectTitle = topic.trim() || cleanFileTitle || 'Document Assessment';
+    const extractedText = extractUploadedFileText(fileName, fileMimeType, fileData);
+    if (extractedText) {
+      contextBlocks.push(`Uploaded Document ("${fileName}") Content:\n${extractedText}`);
+    }
+    if (content.trim()) {
+      contextBlocks.push(`Teacher Instructions / Focus Area:\n${content.trim()}`);
+    }
+    const wiki = await fetchWikipediaContext(subjectTitle);
+    if (wiki) contextBlocks.push(`Reference Context:\n${wiki}`);
+  } else {
+    // Topic or Syllabus mode
+    subjectTitle = topic.trim().split('\n')[0].slice(0, 100) || 'Academic Assessment';
+    if (content.trim()) {
+      contextBlocks.push(`Provided Topic / Syllabus Material:\n${content.trim().slice(0, 8000)}`);
+    }
+    const wiki = await fetchWikipediaContext(subjectTitle);
+    if (wiki) {
+      contextBlocks.push(`Factual Reference Context on "${subjectTitle}":\n${wiki}`);
+    }
+  }
+
+  const systemPrompt = `You are an expert academic professor and exam designer.
+Your task is to generate a genuine, fact-checked, curriculum-accurate multiple-choice quiz strictly about the specific subject/topic provided.
+
+CRITICAL RULES:
+1. Every single question MUST test real, specific facts, concepts, formulas, history, definitions, or problem-solving directly about the requested topic.
+2. NEVER generate generic meta-questions like "What is the foundational analytical principle governing X?" or "Why is predictive modeling important in X?".
+3. If a YouTube video is provided, NEVER ask questions about YouTube as a website/platform—ask questions strictly about the EDUCATIONAL SUBJECT MATTER taught in that video (e.g., its science, math, coding, history, or literature concepts).
+4. Vary which option index (0, 1, 2, or 3) is the correct answer across questions.
+5. Output ONLY valid JSON matching the exact schema below—no extra commentary.`;
+
+  const userPrompt = `Generate ${count} multiple-choice questions at the "${difficulty}" difficulty level.
+
+Target Subject / Topic: "${subjectTitle}"
+Source Mode: ${sourceType}
+
+${contextBlocks.length > 0 ? `Reference Material & Context:\n${contextBlocks.join('\n\n')}\n` : ''}
+Return ONLY a valid JSON object with this exact structure:
+{
+  "title": "Concise, specific academic quiz title for ${subjectTitle}",
+  "subject": "Specific subject name",
+  "description": "1-sentence summary of the specific concepts tested in this quiz",
+  "questions": [
+    {
+      "q": "Specific, factual multiple-choice question?",
+      "options": [
+        "Option A",
+        "Option B",
+        "Option C",
+        "Option D"
+      ],
+      "correctIndex": 0,
+      "explanation": "Clear, factual explanation of why the correct option is right and others are wrong."
+    }
+  ]
+}`;
+
+  let parsed: any = null;
+
+  // Attempt 1: If a standard Google Gemini API key (AIza...) is configured in .env, try @google/genai
+  const envGeminiKey = (process.env.GEMINI_API_KEY || '').trim();
+  if (envGeminiKey.startsWith('AIza')) {
+    try {
+      const { GoogleGenAI } = await import('@google/genai');
+      const ai = new GoogleGenAI({ apiKey: envGeminiKey });
+      const geminiRes = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: `${systemPrompt}\n\n${userPrompt}`,
+        config: { responseMimeType: 'application/json' }
+      });
+      if (geminiRes.text) {
+        parsed = parseJsonFromAiResponse(geminiRes.text);
+      }
+    } catch (err) {
+      console.warn('Gemini SDK call failed, falling back to OpenAI-compatible AI endpoint:', err);
+    }
+  }
+
+  // Attempt 2: Live OpenAI-compatible LLM inference via Pollinations AI (zero key required, real LLM)
+  if (!parsed || !Array.isArray(parsed?.questions) || parsed.questions.length === 0) {
+    const aiRes = await fetch('https://text.pollinations.ai/openai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openai',
+        temperature: 0.4,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ]
+      })
+    });
+
+    if (!aiRes.ok) {
+      throw new Error(`AI service returned HTTP ${aiRes.status}. Please try again.`);
+    }
+
+    const aiJson: any = await aiRes.json();
+    const rawContent = String(aiJson?.choices?.[0]?.message?.content || '');
+    if (!rawContent) {
+      throw new Error('AI returned an empty response. Please try again.');
+    }
+    parsed = parseJsonFromAiResponse(rawContent);
+  }
+
+  const rawQuestions: any[] = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed?.questions)
+    ? parsed.questions
+    : [];
+
+  const questions: Question[] = rawQuestions
+    .map((item, idx) => {
+      if (!item || typeof item.q !== 'string' || !Array.isArray(item.options) || item.options.length < 2) {
+        return null;
+      }
+      const cleanOptions = item.options.slice(0, 4).map((o: unknown) => String(o ?? '').trim());
+      while (cleanOptions.length < 4) {
+        cleanOptions.push(`Option ${cleanOptions.length + 1}`);
+      }
+      const validCorrect = clampInt(item.correctIndex, 0, cleanOptions.length - 1, 0);
+      return {
+        id: `q_${Date.now()}_${idx}`,
+        q: item.q.trim(),
+        options: cleanOptions,
+        correctIndex: validCorrect,
+        points,
+        explanation: String(item.explanation || 'Verified correct answer based on the topic material.').trim()
+      };
+    })
+    .filter(Boolean) as Question[];
+
+  if (questions.length === 0) {
+    throw new Error('Could not generate valid questions for this topic. Please try again with more detail.');
   }
 
   return {
-    title: `${subjectName}`,
-    subject: subjectName,
-    description: `Assessment generated via Gemini (${difficulty} level).`,
+    title: String(parsed?.title || subjectTitle).slice(0, 200),
+    subject: String(parsed?.subject || subjectTitle).slice(0, 200),
+    description: String(
+      parsed?.description || `AI-generated ${difficulty} assessment on ${subjectTitle}.`
+    ).slice(0, 1000),
     questions
   };
 }
@@ -1107,6 +1151,8 @@ app.post('/api/generate-quiz', requireTeacher, async (req: AuthedRequest, res: R
       content = '',
       url = '',
       fileName = '',
+      fileMimeType = '',
+      fileData = '',
       difficulty = 'Intermediate',
       questionCount = 5,
       pointsPerQuestion = 2,
@@ -1116,25 +1162,28 @@ app.post('/api/generate-quiz', requireTeacher, async (req: AuthedRequest, res: R
     const parsedCount = clampInt(questionCount, 2, 20, 5);
     const parsedPoints = clampInt(pointsPerQuestion, 1, 20, 2);
     const parsedDifficulty = DIFFICULTIES.includes(difficulty) ? difficulty : 'Intermediate';
-    const effectiveTopic = String(topic || fileName || url || 'Academic Assessment').trim();
 
-    const synthesized = synthesizeCurriculumQuiz(
-      effectiveTopic,
-      String(content || url || ''),
-      String(sourceType),
-      parsedDifficulty,
-      parsedCount,
-      parsedPoints
-    );
+    const generated = await generateQuizWithRealAi({
+      sourceType: String(sourceType),
+      topic: String(topic || ''),
+      content: String(content || ''),
+      url: String(url || ''),
+      fileName: String(fileName || ''),
+      fileMimeType: String(fileMimeType || ''),
+      fileData: String(fileData || ''),
+      difficulty: parsedDifficulty,
+      count: parsedCount,
+      points: parsedPoints
+    });
 
-    const code = generateUniqueCode(synthesized.subject || effectiveTopic);
+    const code = generateUniqueCode(generated.subject || generated.title || 'QUIZ');
     const exam: StoredExam = {
       id: code,
       code,
       ownerEmail: email,
-      title: String(synthesized.title).slice(0, 200),
-      subject: String(synthesized.subject).slice(0, 200),
-      description: String(synthesized.description).slice(0, 1000),
+      title: generated.title,
+      subject: generated.subject,
+      description: generated.description,
       difficulty: parsedDifficulty,
       defaultTimeLimitMinutes: clampInt(timeLimitMinutes, 1, 300, 15),
       allowStudentCustomTimer: false,
@@ -1142,7 +1191,7 @@ app.post('/api/generate-quiz', requireTeacher, async (req: AuthedRequest, res: R
       shuffleOptions: true,
       showExplanations: true,
       createdAt: Date.now(),
-      questions: synthesized.questions
+      questions: generated.questions
     };
 
     db.exams.unshift(exam);

@@ -106,7 +106,7 @@ export const GeminiQuizGenerator: React.FC<GeminiQuizGeneratorProps> = ({
         payload.content = textInput.trim();
       } else if (sourceType === 'youtube') {
         payload.url = youtubeUrl.trim();
-        payload.topic = textInput.trim() || 'YouTube Lecture';
+        payload.topic = textInput.trim();
         payload.content = textInput.trim();
       } else if (sourceType === 'file') {
         payload.fileName = attachedFile?.name;
