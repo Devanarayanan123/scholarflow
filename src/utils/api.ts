@@ -72,6 +72,27 @@ export const api = {
       body: json({ credential })
     })).teacher,
   signOut: () => request('/api/auth/logout', { method: 'POST' }),
+  requestPasswordReset: (email: string) =>
+    request<{
+      success: boolean;
+      email: string;
+      deliveryMethod: 'gmail_smtp' | 'webmail_relay';
+      emailPreviewUrl?: string;
+      message: string;
+    }>('/api/auth/forgot-password', {
+      method: 'POST',
+      body: json({ email })
+    }),
+  resetPasswordWithCode: async (payload: { email: string; code: string; newPassword: string }) =>
+    (await request<{ teacher: TeacherProfile; message: string }>('/api/auth/reset-password', {
+      method: 'POST',
+      body: json(payload)
+    })).teacher,
+  configureSmtp: (payload: { smtpUser: string; smtpPass: string }) =>
+    request<{ success: boolean; hasSmtpConfigured: boolean; message: string }>('/api/auth/configure-smtp', {
+      method: 'POST',
+      body: json(payload)
+    }),
 
   // Teacher data
   listExams: async () => (await request<{ exams: Exam[] }>('/api/teacher/exams')).exams,

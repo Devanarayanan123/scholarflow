@@ -5,6 +5,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import nodemailer from 'nodemailer';
 import type { Exam, Question, Submission, SubmissionAnswer } from './src/types';
 
 dotenv.config();
@@ -19,6 +20,7 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
 const SESSION_COOKIE = 'sf_session';
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
+const RESET_CODE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 app.use(express.json({ limit: '30mb' }));
 
@@ -35,6 +37,17 @@ interface TeacherRecord {
   createdAt: number;
   lastLoginAt: number;
 }
+interface PasswordResetRecord {
+  email: string;
+  codeSalt: string;
+  codeHash: string;
+  expiresAt: number;
+  attempts: number;
+}
+interface SmtpSettings {
+  user: string;
+  pass: string;
+}
 interface StoredExam extends Exam {
   ownerEmail: string;
 }
@@ -48,6 +61,8 @@ interface SessionRecord {
 interface Database {
   teachers: Record<string, TeacherRecord>;
   sessions: Record<string, SessionRecord>;
+  passwordResets: Record<string, PasswordResetRecord>;
+  smtp?: SmtpSettings;
   exams: StoredExam[];
   submissions: StoredSubmission[];
 }
@@ -62,6 +77,8 @@ function loadDb(): Database {
       return {
         teachers: parsed.teachers || {},
         sessions: parsed.sessions || {},
+        passwordResets: parsed.passwordResets || {},
+        smtp: parsed.smtp || undefined,
         exams: Array.isArray(parsed.exams) ? parsed.exams : [],
         submissions: Array.isArray(parsed.submissions) ? parsed.submissions : []
       };
@@ -69,7 +86,7 @@ function loadDb(): Database {
   } catch (err) {
     console.error('Could not read database file, starting with an empty one:', err);
   }
-  return { teachers: {}, sessions: {}, exams: [], submissions: [] };
+  return { teachers: {}, sessions: {}, passwordResets: {}, exams: [], submissions: [] };
 }
 
 const db = loadDb();
@@ -533,6 +550,326 @@ app.post('/api/auth/logout', (req: Request, res: Response) => {
   }
   setSessionCookie(req, res, '', 0);
   res.json({ success: true });
+});
+
+function getActiveSmtpCredentials(): { user: string; pass: string } | null {
+  const envUser = (process.env.SMTP_USER || process.env.GMAIL_USER || '').trim();
+  const envPass = (process.env.SMTP_PASS || process.env.GMAIL_APP_PASSWORD || '').replace(/\s+/g, '').trim();
+  if (envUser && envPass) {
+    return { user: envUser, pass: envPass };
+  }
+  if (db.smtp?.user && db.smtp?.pass) {
+    return { user: db.smtp.user.trim(), pass: db.smtp.pass.replace(/\s+/g, '').trim() };
+  }
+  return null;
+}
+
+async function sendPasswordResetEmail(params: {
+  toEmail: string;
+  teacherName: string;
+  resetCode: string;
+  resetLink: string;
+}): Promise<{ deliveryMethod: 'gmail_smtp' | 'webmail_relay'; previewUrl?: string }> {
+  const { toEmail, teacherName, resetCode, resetLink } = params;
+  const formattedCode = `${resetCode.slice(0, 3)} ${resetCode.slice(3)}`;
+
+  const subject = `ScholarFlow Password Reset Code: ${resetCode}`;
+  const textBody = [
+    `Hello ${teacherName || toEmail},`,
+    ``,
+    `We received a request to reset the password for your ScholarFlow Teacher account (${toEmail}).`,
+    ``,
+    `Your 6-digit password reset verification code is: ${resetCode}`,
+    ``,
+    `Or click the link below to reset your password directly:`,
+    resetLink,
+    ``,
+    `This code expires in 15 minutes. If you did not request a password reset, you can safely ignore this email.`
+  ].join('\n');
+
+  const htmlBody = `
+    <div style="font-family: 'Segoe UI', Inter, Arial, sans-serif; max-width: 540px; margin: 0 auto; background: #0f172a; color: #f8fafc; border-radius: 16px; padding: 32px; border: 1px solid #1e293b;">
+      <div style="margin-bottom: 20px;">
+        <span style="background: #4f46e5; color: #ffffff; font-weight: 700; font-size: 13px; padding: 6px 12px; border-radius: 8px; display: inline-block;">
+          ScholarFlow · Teacher Portal
+        </span>
+      </div>
+      <h2 style="margin: 0 0 12px; font-size: 22px; color: #ffffff;">Reset Your Teacher Password</h2>
+      <p style="margin: 0 0 18px; font-size: 14px; line-height: 1.6; color: #cbd5e1;">
+        Hello <strong style="color: #ffffff;">${teacherName || toEmail}</strong>,<br/>
+        A password reset was requested for your ScholarFlow Teacher Gmail account (<span style="color: #818cf8;">${toEmail}</span>).
+      </p>
+      <div style="background: #020617; border: 1px solid #334155; border-radius: 12px; padding: 20px; text-align: center; margin: 24px 0;">
+        <div style="font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px; color: #94a3b8; margin-bottom: 8px;">
+          6-Digit Verification Code (Valid for 15 Minutes)
+        </div>
+        <div style="font-family: 'Courier New', monospace; font-size: 32px; font-weight: 800; letter-spacing: 6px; color: #34d399;">
+          ${formattedCode}
+        </div>
+      </div>
+      <div style="text-align: center; margin: 24px 0;">
+        <a href="${resetLink}" style="background: #4f46e5; color: #ffffff; text-decoration: none; font-weight: 700; font-size: 14px; padding: 12px 24px; border-radius: 10px; display: inline-block;">
+          Reset Password Now →
+        </a>
+      </div>
+      <p style="margin: 24px 0 0; font-size: 12px; color: #64748b; border-top: 1px solid #1e293b; padding-top: 16px;">
+        If you did not request this password reset, your account remains secure and no changes have been made.
+      </p>
+    </div>
+  `;
+
+  // 1. Try real Gmail SMTP if credentials are configured
+  const smtpCreds = getActiveSmtpCredentials();
+  if (smtpCreds) {
+    try {
+      const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        host: 'smtp.gmail.com',
+        port: 465,
+        secure: true,
+        auth: {
+          user: smtpCreds.user,
+          pass: smtpCreds.pass
+        }
+      });
+
+      await transporter.sendMail({
+        from: `"ScholarFlow Security" <${smtpCreds.user}>`,
+        to: toEmail,
+        subject,
+        text: textBody,
+        html: htmlBody
+      });
+
+      return { deliveryMethod: 'gmail_smtp' };
+    } catch (smtpErr: any) {
+      console.warn('Gmail SMTP delivery failed, falling back to Ethereal Webmail Relay:', smtpErr?.message || smtpErr);
+    }
+  }
+
+  // 2. Send real email via Ethereal SMTP relay and provide the direct webmail inbox preview link
+  const testAccount = await nodemailer.createTestAccount();
+  const relayTransporter = nodemailer.createTransport({
+    host: testAccount.smtp.host,
+    port: testAccount.smtp.port,
+    secure: testAccount.smtp.secure,
+    auth: {
+      user: testAccount.user,
+      pass: testAccount.pass
+    }
+  });
+
+  const info = await relayTransporter.sendMail({
+    from: `"ScholarFlow Security" <security@scholarflow.edu>`,
+    to: toEmail,
+    subject,
+    text: textBody,
+    html: htmlBody
+  });
+
+  const previewUrl = nodemailer.getTestMessageUrl(info) || undefined;
+  return {
+    deliveryMethod: 'webmail_relay',
+    previewUrl: typeof previewUrl === 'string' ? previewUrl : undefined
+  };
+}
+
+app.post('/api/auth/forgot-password', async (req: Request, res: Response) => {
+  try {
+    const rawEmail = String(req.body?.email || '').trim().toLowerCase();
+    const emailCheck = validateGenuineGmail(rawEmail);
+    if (!emailCheck.valid) {
+      res.status(400).json({ success: false, message: emailCheck.reason });
+      return;
+    }
+
+    const teacher = db.teachers[rawEmail];
+    if (!teacher) {
+      res.status(404).json({
+        success: false,
+        message: 'No registered Teacher account was found for this Gmail address.'
+      });
+      return;
+    }
+
+    const resetCode = String(crypto.randomInt(100000, 1000000));
+    const codeSalt = crypto.randomBytes(16).toString('hex');
+    db.passwordResets[rawEmail] = {
+      email: rawEmail,
+      codeSalt,
+      codeHash: hashPassword(resetCode, codeSalt),
+      expiresAt: Date.now() + RESET_CODE_TTL_MS,
+      attempts: 0
+    };
+    saveDb();
+
+    // Determine public base URL for the reset link inside the email
+    const cloudUrlFile = path.join(DATA_DIR, 'cloud-url.txt');
+    let baseUrl = '';
+    if (fs.existsSync(cloudUrlFile)) {
+      try {
+        baseUrl = fs.readFileSync(cloudUrlFile, 'utf8').trim();
+      } catch {}
+    }
+    if (!baseUrl) {
+      const host = (req.get('x-forwarded-host') || req.get('host') || 'localhost:3000').trim();
+      const proto = (req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
+      baseUrl = `${proto}://${host}`;
+    }
+    const resetLink = `${baseUrl.replace(/\/+$/, '')}/?resetEmail=${encodeURIComponent(rawEmail)}&resetCode=${encodeURIComponent(resetCode)}`;
+
+    const mailResult = await sendPasswordResetEmail({
+      toEmail: rawEmail,
+      teacherName: teacher.name,
+      resetCode,
+      resetLink
+    });
+
+    res.json({
+      success: true,
+      email: rawEmail,
+      deliveryMethod: mailResult.deliveryMethod,
+      emailPreviewUrl: mailResult.previewUrl,
+      message:
+        mailResult.deliveryMethod === 'gmail_smtp'
+          ? `A 6-digit password reset code has been sent to ${rawEmail}. Please check your Gmail inbox.`
+          : `Password reset email generated for ${rawEmail}. Click "Open Sent Reset Email" below to view your 6-digit verification code (or configure Gmail SMTP for direct inbox delivery).`
+    });
+  } catch (err: any) {
+    console.error('Forgot password error:', err);
+    res.status(500).json({
+      success: false,
+      message: err?.message || 'Could not send password reset email. Please try again.'
+    });
+  }
+});
+
+app.post('/api/auth/reset-password', (req: Request, res: Response) => {
+  try {
+    const rawEmail = String(req.body?.email || '').trim().toLowerCase();
+    const code = String(req.body?.code || '').replace(/\s+/g, '').trim();
+    const newPassword = String(req.body?.newPassword || '');
+
+    const teacher = db.teachers[rawEmail];
+    if (!teacher) {
+      res.status(404).json({
+        success: false,
+        message: 'No registered Teacher account was found for this Gmail address.'
+      });
+      return;
+    }
+
+    const resetRecord = db.passwordResets[rawEmail];
+    if (!resetRecord || resetRecord.expiresAt < Date.now()) {
+      delete db.passwordResets[rawEmail];
+      saveDb();
+      res.status(400).json({
+        success: false,
+        message: 'Your password reset code has expired or is invalid. Please request a new code.'
+      });
+      return;
+    }
+
+    if (resetRecord.attempts >= 5) {
+      delete db.passwordResets[rawEmail];
+      saveDb();
+      res.status(429).json({
+        success: false,
+        message: 'Too many incorrect code attempts. Please request a new reset code.'
+      });
+      return;
+    }
+
+    if (!code || !verifyPassword(code, resetRecord.codeSalt, resetRecord.codeHash)) {
+      resetRecord.attempts += 1;
+      saveDb();
+      res.status(401).json({
+        success: false,
+        message: 'Invalid 6-digit verification code. Please check the email and try again.'
+      });
+      return;
+    }
+
+    if (!newPassword || newPassword.length < 6) {
+      res.status(400).json({
+        success: false,
+        message: 'Your new password must be at least 6 characters long.'
+      });
+      return;
+    }
+
+    // Update teacher's password with a fresh salt
+    const newSalt = crypto.randomBytes(16).toString('hex');
+    teacher.passwordSalt = newSalt;
+    teacher.passwordHash = hashPassword(newPassword, newSalt);
+    teacher.lastLoginAt = Date.now();
+
+    // Clear reset record & invalidate any older sessions for this teacher
+    delete db.passwordResets[rawEmail];
+    for (const [tokenHash, session] of Object.entries(db.sessions)) {
+      if (session.email === rawEmail) {
+        delete db.sessions[tokenHash];
+      }
+    }
+
+    // Create a fresh authenticated session
+    const token = crypto.randomBytes(32).toString('hex');
+    pruneExpiredSessions();
+    db.sessions[hashToken(token)] = { email: rawEmail, expiresAt: Date.now() + SESSION_TTL_MS };
+    saveDb();
+
+    setSessionCookie(req, res, token, SESSION_TTL_MS);
+    res.json({
+      success: true,
+      teacher: publicTeacher(teacher),
+      message: 'Password reset successfully! You are now signed in.'
+    });
+  } catch (err: any) {
+    console.error('Reset password error:', err);
+    res.status(500).json({
+      success: false,
+      message: 'Could not reset password. Please try again.'
+    });
+  }
+});
+
+app.post('/api/auth/configure-smtp', async (req: Request, res: Response) => {
+  try {
+    const smtpUser = String(req.body?.smtpUser || '').trim().toLowerCase();
+    const smtpPass = String(req.body?.smtpPass || '').replace(/\s+/g, '').trim();
+
+    if (!smtpUser || !smtpPass) {
+      db.smtp = undefined;
+      saveDb();
+      res.json({ success: true, hasSmtpConfigured: false, message: 'Cleared custom Gmail SMTP settings.' });
+      return;
+    }
+
+    // Verify the Gmail SMTP credentials before saving
+    const transporter = nodemailer.createTransport({
+      service: 'gmail',
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: { user: smtpUser, pass: smtpPass }
+    });
+    await transporter.verify();
+
+    db.smtp = { user: smtpUser, pass: smtpPass };
+    saveDb();
+    res.json({
+      success: true,
+      hasSmtpConfigured: true,
+      smtpUser,
+      message: `Verified & saved Gmail SMTP sender (${smtpUser}). Password reset emails will now be delivered directly to Gmail inboxes!`
+    });
+  } catch (err: any) {
+    res.status(400).json({
+      success: false,
+      message:
+        'Could not verify Gmail SMTP credentials. Make sure you use your Gmail address and a 16-character Google App Password (from myaccount.google.com/apppasswords).'
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------

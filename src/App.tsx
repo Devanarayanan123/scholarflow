@@ -141,7 +141,9 @@ const TeacherArea: React.FC<{ showToast: ShowToast }> = ({ showToast }) => {
         if (cfg.cloudUrl) {
           setConfiguredCloudUrl(cfg.cloudUrl);
         }
-        if (current) {
+        const params = new URLSearchParams(window.location.search);
+        const isResetLink = Boolean(params.get('resetEmail') && params.get('resetCode'));
+        if (current && !isResetLink) {
           setTeacher(current);
           await loadTeacherData();
           if (!cancelled) setStatus('signedIn');
@@ -199,6 +201,25 @@ const TeacherArea: React.FC<{ showToast: ShowToast }> = ({ showToast }) => {
       showToast(`Signed in as ${profile.email}`);
     } catch (err: any) {
       setLoginError(err?.message || 'Sign-in failed.');
+    } finally {
+      setIsSigningIn(false);
+    }
+  };
+
+  const handlePasswordResetSuccess = async (payload: {
+    email: string;
+    code: string;
+    newPassword: string;
+  }) => {
+    setIsSigningIn(true);
+    setLoginError('');
+    try {
+      const profile = await api.resetPasswordWithCode(payload);
+      setTeacher(profile);
+      setConfig((prev) => ({ ...prev, hasRegisteredTeacher: true }));
+      await loadTeacherData();
+      setStatus('signedIn');
+      showToast(`Password updated! Signed in as ${profile.email}`);
     } finally {
       setIsSigningIn(false);
     }
@@ -346,6 +367,7 @@ const TeacherArea: React.FC<{ showToast: ShowToast }> = ({ showToast }) => {
             error={loginError}
             onLoginSubmit={handleLoginSubmit}
             onCredential={handleCredential}
+            onPasswordResetSuccess={handlePasswordResetSuccess}
           />
         )}
 
